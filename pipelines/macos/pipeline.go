@@ -1,10 +1,8 @@
 package macos
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"image/jpeg"
 	"sync"
 
 	sckit "github.com/LocalKinAI/sckit-go"
@@ -40,7 +38,7 @@ func (p *macOSPipeline) ListDisplays(ctx context.Context) ([]pipelines.DisplayMe
 }
 
 func (p *macOSPipeline) SupportedFormats() []pipelines.FrameFormat {
-	return []pipelines.FrameFormat{pipelines.FormatJPEG}
+	return []pipelines.FrameFormat{pipelines.FormatBGRA}
 }
 
 func (p *macOSPipeline) StartStream(ctx context.Context, displayID uint32, fps int) (pipelines.FrameStream, error) {
@@ -68,7 +66,7 @@ func (p *macOSPipeline) StartStream(ctx context.Context, displayID uint32, fps i
 		return nil, fmt.Errorf("macos: new stream: %w", err)
 	}
 
-	ch := make(chan pipelines.EncodedFrame, 8)
+	ch := make(chan pipelines.EncodedFrame, 4)
 	fs := &frameStream{ch: ch, stream: stream}
 
 	go fs.run(ctx)
@@ -96,20 +94,21 @@ func (f *frameStream) Close() error {
 func (f *frameStream) run(ctx context.Context) {
 	defer f.Close()
 	for {
-		img, err := f.stream.NextFrame(ctx)
+		frame, err := f.stream.NextFrameBGRA(ctx)
 		if err != nil {
 			return
 		}
-		var buf bytes.Buffer
-		if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 80}); err != nil {
-			return
-		}
+		pix := make([]byte, len(frame.Pixels))
+		copy(pix, frame.Pixels)
 		select {
-		case f.ch <- pipelines.EncodedFrame{Data: buf.Bytes(), Format: pipelines.FormatJPEG}:
+		case f.ch <- pipelines.EncodedFrame{
+			Data:   pix,
+			Format: pipelines.FormatBGRA,
+			Width:  frame.Width,
+			Height: frame.Height,
+		}:
 		case <-ctx.Done():
 			return
 		}
 	}
 }
-
-

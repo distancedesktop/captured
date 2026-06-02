@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net"
@@ -18,27 +19,35 @@ import (
 
 var pipeline pipelines.Pipeline
 
-func _getPipeline() pipelines.Pipeline {
-	switch runtime.GOOS {
-	  case "darwin":
-		  return macos.New()
-	  default:
-		  log.Fatalf("unsupported platform: %s", runtime.GOOS)
-	}
-}
-
 func main() {
-	// platform check
+	listen := flag.String("listen", "", "TCP address for remote control (e.g. :9090)")
+	flag.Parse()
+
+	switch runtime.GOOS {
+	case "darwin":
+		pipeline = macos.New()
+	default:
+		log.Fatalf("unsupported platform: %s", runtime.GOOS)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	os.Remove("captured.socket")
-	l, err := net.Listen("unix", "captured.socket")
+	os.Remove("/tmp/captured.socket")
+	ul, err := net.Listen("unix", "/tmp/captured.socket")
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Println("listening on captured.socket")
+	log.Println("unix: /tmp/captured.socket")
+
+	var tl net.Listener
+	if *listen != "" {
+		tl, err = net.Listen("tcp", *listen)
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Printf("tcp: %s", *listen)
+	}
 
 	var stream pipelines.FrameStream
 	var streamMu sync.Mutex
@@ -80,8 +89,8 @@ func main() {
 					continue
 				}
 				stream = s
-				os.Remove("captured-media.socket")
-				ml, err := net.Listen("unix", "captured-media.socket")
+				os.Remove("/tmp/captured-media.socket")
+				ml, err := net.Listen("unix", "/tmp/captured-media.socket")
 				if err != nil {
 					stream.Close()
 					stream = nil
@@ -94,7 +103,6 @@ func main() {
 					ml.Close()
 				}()
 				go func() {
-					// accept one client and stream frames to it
 					mc, err := ml.Accept()
 					ml.Close()
 					if err != nil {
@@ -102,18 +110,21 @@ func main() {
 					}
 					defer mc.Close()
 					for f := range s.Frames() {
-						header := make([]byte, 4)
-						binary.BigEndian.PutUint32(header, uint32(len(f.Data)))
-						if _, err := mc.Write(header); err != nil {
-							return
-						}
-						if _, err := mc.Write(f.Data); err != nil {
+						buf := make([]byte, 8+len(f.Data))
+						binary.BigEndian.PutUint32(buf[0:4], uint32(f.Width))
+						binary.BigEndian.PutUint32(buf[4:8], uint32(f.Height))
+						copy(buf[8:], f.Data)
+						if _, err := mc.Write(buf); err != nil {
 							return
 						}
 					}
 				}()
 				streamMu.Unlock()
-				enc.Encode(map[string]string{"type": "stream-started", "socket": "captured-media.socket"})
+				enc.Encode(map[string]any{
+					"type":   "stream-started",
+					"socket": "/tmp/captured-media.socket",
+					"format": "bgra",
+				})
 
 			case "stop-stream":
 				streamMu.Lock()
@@ -121,7 +132,7 @@ func main() {
 					stream.Close()
 					stream = nil
 				}
-				os.Remove("captured-media.socket")
+				// os.Remove("/tmp/captured-media.socket") - do NOT fucking do this
 				streamMu.Unlock()
 				enc.Encode(map[string]string{"type": "stream-stopped"})
 
@@ -143,17 +154,25 @@ func main() {
 		}
 	}
 
-	go func() {
-		<-ctx.Done()
-		l.Close()
-	}()
-
-	for {
-		conn, err := l.Accept()
-		if err != nil {
-			break
+	accept := func(l net.Listener) {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go serveConn(conn)
 		}
-		go serveConn(conn)
+	}
+
+	go accept(ul)
+	if tl != nil {
+		go accept(tl)
+	}
+
+	<-ctx.Done()
+	ul.Close()
+	if tl != nil {
+		tl.Close()
 	}
 
 	streamMu.Lock()
@@ -161,5 +180,5 @@ func main() {
 		stream.Close()
 	}
 	streamMu.Unlock()
-	os.Remove("captured-media.socket")
+	os.Remove("/tmp/captured-media.socket")
 }

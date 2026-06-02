@@ -14,12 +14,14 @@ type DisplayMeta struct {
 type FrameFormat string
 
 const (
-	FormatJPEG FrameFormat = "jpeg"
+	FormatBGRA FrameFormat = "bgra"
 )
 
 type EncodedFrame struct {
 	Data   []byte
 	Format FrameFormat
+	Width  int
+	Height int
 }
 
 type FrameStream interface {
