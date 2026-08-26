@@ -82,7 +82,7 @@ func newGBMBuffer(devPath string, w, h int) (*gbmBO, error) {
 		return nil, fmt.Errorf("gbm_create_device failed")
 	}
 	bo := gbmBoCreate(devH, uint32(w), uint32(h), gbmFormatXRGB8888,
-		gbmBoUseRendering|gbmBoUseWrite|gbmBoUseLinear)
+		gbmBoUseRendering|gbmBoUseLinear)
 	if bo == 0 {
 		gbmDeviceDestroy(devH)
 		f.Close()

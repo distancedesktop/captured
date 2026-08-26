@@ -124,11 +124,6 @@ func (p *x11Pipeline) StartStream(ctx context.Context, displayID uint32, fps int
 	if target == nil {
 		return nil, fmt.Errorf("linux/x11: display %d not found", displayID)
 	}
-	// X11 pixel capture (XShmGetImage) is a follow-up; stream a synthetic
-	// BGRA pattern through the same socket protocol for now.
-	g, err := newSynthCapture(target.Width, target.Height)
-	if err != nil {
-		return nil, err
-	}
-	return newFrameStream(g, fps), nil
+	// X11 pixel capture (XShmGetImage) is not yet implemented.
+	return nil, fmt.Errorf("linux/x11: X11 pixel readback not yet implemented")
 }

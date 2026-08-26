@@ -40,7 +40,7 @@ var (
 	drmModeFreeCrtc      func(c unsafe.Pointer)
 	drmModeGetFB2        func(fd int, id uint32) unsafe.Pointer
 	drmModeFreeFB2       func(f unsafe.Pointer)
-	drmPrimeHandleToFD   func(fd int, handle uint32, flags int) int
+	drmPrimeHandleToFD   func(fd int, handle uint32, flags uint32, prime_fd *int32) int
 )
 
 func loadDRM() {
@@ -147,12 +147,10 @@ type drmModeFB2 struct {
 	Height      uint32
 	PixelFormat uint32
 	Modifier    uint64
+	Flags       uint32
 	Handles     [4]uint32
 	Pitches     [4]uint32
 	Offsets     [4]uint32
-	NumPlanes   uint32
-	_           uint32 // padding so Flags (u64) is 8-byte aligned
-	Flags       uint64
 }
 
 const (
@@ -161,8 +159,8 @@ const (
 	drmFormatModLinear   = 0
 	drmFormatXRGB8888    = 0x34325258
 	drmFormatARGB8888    = 0x34325241
-	drmFormatRGBX8888    = 0x38445258
-	drmFormatBGRX8888    = 0x38585242
+	drmFormatRGBX8888    = 0x34325852
+	drmFormatBGRX8888    = 0x34325842
 )
 
 // linuxDisplay is a resolved display we can re-open for streaming.
@@ -354,11 +352,13 @@ func newKMSCapture(d *linuxDisplay) (grabber, error) {
 		return nil, fmt.Errorf("unsupported framebuffer format 0x%x", format)
 	}
 
-	dmabuf := drmPrimeHandleToFD(fd, handle, 0)
-	if dmabuf < 0 {
+	var primeFD int32
+	ret := drmPrimeHandleToFD(fd, handle, 0x80000, &primeFD)
+	if ret != 0 {
 		f.Close()
 		return nil, fmt.Errorf("drmPrimeHandleToFD failed")
 	}
+	dmabuf := int(primeFD)
 	mapped, err := mmapRO(dmabuf, pitch*height)
 	if err != nil {
 		closeFD(dmabuf)

@@ -95,7 +95,7 @@ func (p *kmsPipeline) StartStream(ctx context.Context, displayID uint32, fps int
 			return nil, err
 		}
 	}
-	return newFrameStream(g, fps), nil
+	return newFrameStream(ctx, g, fps), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -107,21 +107,38 @@ type frameStream struct {
 	cancel    context.CancelFunc
 	closeOnce sync.Once
 	g         grabber
+	done      chan struct{}
 }
 
-func newFrameStream(g grabber, fps int) *frameStream {
-	ctx, cancel := context.WithCancel(context.Background())
-	fs := &frameStream{ch: make(chan pipelines.EncodedFrame, 4), cancel: cancel, g: g}
-	go fs.run(ctx, fps)
+func newFrameStream(ctx context.Context, g grabber, fps int) *frameStream {
+	ctx, cancel := context.WithCancel(ctx)
+	fs := &frameStream{
+		ch:     make(chan pipelines.EncodedFrame, 4),
+		cancel: cancel,
+		g:      g,
+		done:   make(chan struct{}),
+	}
+	go func() {
+		fs.run(ctx, fps)
+		close(fs.done)
+	}()
 	return fs
 }
 
 func (fs *frameStream) run(ctx context.Context, fps int) {
-	defer fs.Close()
+	defer func() {
+		_ = fs.g.close()
+		close(fs.ch)
+	}()
 	delay := time.Duration(int64(time.Second) / int64(fps))
 	ticker := time.NewTicker(delay)
 	defer ticker.Stop()
 	for range ticker.C {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
 		bgra, w, h, err := fs.g.grab()
 		if err != nil {
 			return
@@ -141,8 +158,7 @@ func (fs *frameStream) Frames() <-chan pipelines.EncodedFrame {
 func (fs *frameStream) Close() error {
 	fs.closeOnce.Do(func() {
 		fs.cancel()
-		_ = fs.g.close()
-		close(fs.ch)
+		<-fs.done
 	})
 	return nil
 }
