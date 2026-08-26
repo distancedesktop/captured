@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"distancedesktop/captured/pipelines"
+	"distancedesktop/captured/pipelines/linux"
 	"distancedesktop/captured/pipelines/macos"
 )
 
@@ -21,11 +22,14 @@ var pipeline pipelines.Pipeline
 
 func main() {
 	listen := flag.String("listen", "", "TCP address for remote control (e.g. :9090)")
+	source := flag.String("source", "kms", "capture source on linux: kms|x11")
 	flag.Parse()
 
 	switch runtime.GOOS {
 	case "darwin":
 		pipeline = macos.New()
+	case "linux":
+		pipeline = linux.New(*source)
 	default:
 		log.Fatalf("unsupported platform: %s", runtime.GOOS)
 	}
