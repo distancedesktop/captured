@@ -171,9 +171,12 @@ type pwSession struct {
 // startMutterScreenCast creates a session, records the given connector, starts
 // it, and waits for the PipeWireStreamAdded signal carrying the node id.
 //
-// The wait is bounded: if Mutter accepts the session but never emits the signal
-// (a compositor restart mid-handshake, for instance), this must not block
-// StartStream forever, since ctx is the daemon's long-lived context.
+// Every step is bounded by screenCastStartTimeout: if Mutter accepts the session
+// but never emits the signal (a compositor restart mid-handshake, for instance),
+// this must not block StartStream forever, since ctx is the daemon's long-lived
+// context. The D-Bus calls use CallWithContext for the same reason -- a
+// synchronous Call would ignore the deadline entirely and could block past it
+// before the timeout select is ever reached.
 func startMutterScreenCast(ctx context.Context, connector string) (*pwSession, error) {
 	ctx, cancel := context.WithTimeout(ctx, screenCastStartTimeout)
 	defer cancel()
@@ -185,38 +188,59 @@ func startMutterScreenCast(ctx context.Context, connector string) (*pwSession, e
 	sc := conn.Object(mutterScreenCastName, dbus.ObjectPath(mutterScreenCastPath))
 
 	var sessionPath dbus.ObjectPath
-	if err := sc.Call(mutterScreenCastName+".CreateSession", 0, map[string]dbus.Variant{}).Store(&sessionPath); err != nil {
+	if err := sc.CallWithContext(ctx, mutterScreenCastName+".CreateSession", 0, map[string]dbus.Variant{}).Store(&sessionPath); err != nil {
 		return nil, fmt.Errorf("linux/pipewire: CreateSession: %w", err)
 	}
 	sess := conn.Object(mutterScreenCastName, sessionPath)
+
+	// stopSession tears down a session created above. It deliberately does not
+	// use ctx: on the timeout path ctx is already expired, and the session must
+	// still be released or Mutter keeps recording.
+	stopSession := func() {
+		_ = sess.Call(mutterScreenCastName+".Session.Stop", 0).Err
+	}
 
 	var streamPath dbus.ObjectPath
 	opts := map[string]dbus.Variant{
 		"cursor-mode": dbus.MakeVariant(uint32(cursorModeEmbedded)),
 	}
-	if err := sess.Call(mutterScreenCastName+".Session.RecordMonitor", 0, connector, opts).Store(&streamPath); err != nil {
-		_ = sess.Call(mutterScreenCastName+".Session.Stop", 0).Err
+	if err := sess.CallWithContext(ctx, mutterScreenCastName+".Session.RecordMonitor", 0, connector, opts).Store(&streamPath); err != nil {
+		stopSession()
 		return nil, fmt.Errorf("linux/pipewire: RecordMonitor(%s): %w", connector, err)
 	}
 
 	// Subscribe before Start so the signal cannot be missed.
-	if err := conn.AddMatchSignal(
+	matchOpts := []dbus.MatchOption{
 		dbus.WithMatchObjectPath(streamPath),
-		dbus.WithMatchInterface(mutterScreenCastName+".Stream"),
+		dbus.WithMatchInterface(mutterScreenCastName + ".Stream"),
 		dbus.WithMatchMember("PipeWireStreamAdded"),
-	); err != nil {
+	}
+	if err := conn.AddMatchSignalContext(ctx, matchOpts...); err != nil {
+		stopSession()
 		return nil, fmt.Errorf("linux/pipewire: AddMatchSignal: %w", err)
 	}
 	sigCh := make(chan *dbus.Signal, 4)
 	conn.Signal(sigCh)
+	// The match rule and channel are only needed for this handshake; pwSession
+	// does not retain them, so they must not outlive this function.
+	defer func() {
+		conn.RemoveSignal(sigCh)
+		_ = conn.RemoveMatchSignal(matchOpts...)
+	}()
 
-	if err := sess.Call(mutterScreenCastName+".Session.Start", 0).Err; err != nil {
+	if err := sess.CallWithContext(ctx, mutterScreenCastName+".Session.Start", 0).Err; err != nil {
+		stopSession()
 		return nil, fmt.Errorf("linux/pipewire: Session.Start: %w", err)
 	}
 
 	for {
 		select {
-		case sig := <-sigCh:
+		case sig, ok := <-sigCh:
+			// A closed connection closes sigCh, yielding a nil signal.
+			if !ok || sig == nil {
+				stopSession()
+				return nil, fmt.Errorf("linux/pipewire: session bus closed while waiting for PipeWireStreamAdded")
+			}
 			if sig.Path != streamPath || !strings.HasSuffix(sig.Name, "PipeWireStreamAdded") {
 				continue
 			}
@@ -229,8 +253,8 @@ func startMutterScreenCast(ctx context.Context, connector string) (*pwSession, e
 			}
 			return &pwSession{conn: conn, sessionPath: sessionPath, nodeID: id}, nil
 		case <-ctx.Done():
-			_ = sess.Call(mutterScreenCastName+".Session.Stop", 0).Err
-			return nil, fmt.Errorf("linux/pipewire: timed out waiting for PipeWireStreamAdded")
+			stopSession()
+			return nil, fmt.Errorf("linux/pipewire: timed out waiting for PipeWireStreamAdded: %w", ctx.Err())
 		}
 	}
 }
@@ -253,6 +277,17 @@ type pipewireGrabber struct {
 	height int
 	frame  []byte
 	once   sync.Once
+}
+
+// interrupt unblocks a grab() that is waiting on a partial frame, so a stream
+// can be closed while the compositor is idle and producing nothing. Killing the
+// child and closing the pipe both make the pending read return an error.
+// Safe to call more than once, and safe to call concurrently with grab().
+func (g *pipewireGrabber) interrupt() {
+	if g.cmd != nil && g.cmd.Process != nil {
+		_ = g.cmd.Process.Kill()
+	}
+	_ = g.stdout.Close()
 }
 
 func newPipeWireCapture(ctx context.Context, connector string, w, h, fps int) (grabber, error) {
@@ -313,11 +348,10 @@ func (g *pipewireGrabber) grab() ([]byte, int, int, error) {
 
 func (g *pipewireGrabber) close() error {
 	g.once.Do(func() {
+		g.interrupt()
 		if g.cmd != nil && g.cmd.Process != nil {
-			_ = g.cmd.Process.Kill()
 			_, _ = g.cmd.Process.Wait()
 		}
-		_ = g.stdout.Close()
 		g.sess.stop()
 	})
 	return nil

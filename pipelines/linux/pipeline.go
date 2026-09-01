@@ -157,9 +157,23 @@ func (fs *frameStream) Frames() <-chan pipelines.EncodedFrame {
 	return fs.ch
 }
 
+// interruptibleGrabber is a grabber whose blocking grab() can be unblocked from
+// another goroutine, so a stream can be torn down while no frames are arriving.
+type interruptibleGrabber interface {
+	grabber
+	interrupt()
+}
+
 // newPulledFrameStream drives a grabber whose grab() blocks until the source
 // produces a frame (PipeWire), rather than sampling on a ticker. The source's
 // own cadence sets the frame rate.
+//
+// Because grab() blocks, cancellation alone is not enough: Close waits on the
+// producer goroutine, which would be parked inside grab() until the compositor
+// happened to send another frame. A watchdog goroutine therefore interrupts the
+// grabber as soon as ctx is done, which makes the pending read fail and lets the
+// producer exit. Without it, closing an idle stream deadlocks and leaks the
+// gst-launch-1.0 child.
 func newPulledFrameStream(ctx context.Context, g grabber) *frameStream {
 	ctx, cancel := context.WithCancel(ctx)
 	fs := &frameStream{
@@ -167,6 +181,12 @@ func newPulledFrameStream(ctx context.Context, g grabber) *frameStream {
 		cancel: cancel,
 		g:      g,
 		done:   make(chan struct{}),
+	}
+	if ig, ok := g.(interruptibleGrabber); ok {
+		go func() {
+			<-ctx.Done()
+			ig.interrupt()
+		}()
 	}
 	go func() {
 		defer func() {
