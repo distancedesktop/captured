@@ -30,11 +30,13 @@ type grabber interface {
 type kmsPipeline struct{}
 
 // New returns a Linux capture pipeline for the given source. Supported values
-// are "kms" (default) and "x11"; unknown values fall back to kms.
+// are "kms" (default), "pipewire" and "x11"; unknown values fall back to kms.
 func New(source string) pipelines.Pipeline {
 	switch source {
 	case "x11":
 		return &x11Pipeline{}
+	case "pipewire", "pw":
+		return &pipewirePipeline{}
 	case "", "kms":
 		return &kmsPipeline{}
 	default:
@@ -153,6 +155,43 @@ func (fs *frameStream) run(ctx context.Context, fps int) {
 
 func (fs *frameStream) Frames() <-chan pipelines.EncodedFrame {
 	return fs.ch
+}
+
+// newPulledFrameStream drives a grabber whose grab() blocks until the source
+// produces a frame (PipeWire), rather than sampling on a ticker. The source's
+// own cadence sets the frame rate.
+func newPulledFrameStream(ctx context.Context, g grabber) *frameStream {
+	ctx, cancel := context.WithCancel(ctx)
+	fs := &frameStream{
+		ch:     make(chan pipelines.EncodedFrame, 4),
+		cancel: cancel,
+		g:      g,
+		done:   make(chan struct{}),
+	}
+	go func() {
+		defer func() {
+			_ = fs.g.close()
+			close(fs.ch)
+			close(fs.done)
+		}()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			bgra, w, h, err := fs.g.grab()
+			if err != nil {
+				return
+			}
+			select {
+			case fs.ch <- pipelines.EncodedFrame{Data: bgra, Format: pipelines.FormatBGRA, Width: w, Height: h}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return fs
 }
 
 func (fs *frameStream) Close() error {
