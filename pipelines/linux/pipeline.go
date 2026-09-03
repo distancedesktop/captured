@@ -30,11 +30,13 @@ type grabber interface {
 type kmsPipeline struct{}
 
 // New returns a Linux capture pipeline for the given source. Supported values
-// are "kms" (default) and "x11"; unknown values fall back to kms.
+// are "kms" (default), "pipewire" and "x11"; unknown values fall back to kms.
 func New(source string) pipelines.Pipeline {
 	switch source {
 	case "x11":
 		return &x11Pipeline{}
+	case "pipewire", "pw":
+		return &pipewirePipeline{}
 	case "", "kms":
 		return &kmsPipeline{}
 	default:
@@ -153,6 +155,63 @@ func (fs *frameStream) run(ctx context.Context, fps int) {
 
 func (fs *frameStream) Frames() <-chan pipelines.EncodedFrame {
 	return fs.ch
+}
+
+// interruptibleGrabber is a grabber whose blocking grab() can be unblocked from
+// another goroutine, so a stream can be torn down while no frames are arriving.
+type interruptibleGrabber interface {
+	grabber
+	interrupt()
+}
+
+// newPulledFrameStream drives a grabber whose grab() blocks until the source
+// produces a frame (PipeWire), rather than sampling on a ticker. The source's
+// own cadence sets the frame rate.
+//
+// Because grab() blocks, cancellation alone is not enough: Close waits on the
+// producer goroutine, which would be parked inside grab() until the compositor
+// happened to send another frame. A watchdog goroutine therefore interrupts the
+// grabber as soon as ctx is done, which makes the pending read fail and lets the
+// producer exit. Without it, closing an idle stream deadlocks and leaks the
+// gst-launch-1.0 child.
+func newPulledFrameStream(ctx context.Context, g grabber) *frameStream {
+	ctx, cancel := context.WithCancel(ctx)
+	fs := &frameStream{
+		ch:     make(chan pipelines.EncodedFrame, 4),
+		cancel: cancel,
+		g:      g,
+		done:   make(chan struct{}),
+	}
+	if ig, ok := g.(interruptibleGrabber); ok {
+		go func() {
+			<-ctx.Done()
+			ig.interrupt()
+		}()
+	}
+	go func() {
+		defer func() {
+			_ = fs.g.close()
+			close(fs.ch)
+			close(fs.done)
+		}()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			bgra, w, h, err := fs.g.grab()
+			if err != nil {
+				return
+			}
+			select {
+			case fs.ch <- pipelines.EncodedFrame{Data: bgra, Format: pipelines.FormatBGRA, Width: w, Height: h}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return fs
 }
 
 func (fs *frameStream) Close() error {

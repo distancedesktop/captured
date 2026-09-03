@@ -22,7 +22,7 @@ var pipeline pipelines.Pipeline
 
 func main() {
 	listen := flag.String("listen", "", "TCP address for remote control (e.g. :9090)")
-	source := flag.String("source", "kms", "capture source on linux: kms|x11")
+	source := flag.String("source", "kms", "capture source on linux: kms|pipewire|x11")
 	flag.Parse()
 
 	switch runtime.GOOS {
