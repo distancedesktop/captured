@@ -10,15 +10,27 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"sync"
 
 	"distancedesktop/captured/pipelines"
 	"distancedesktop/captured/pipelines/linux"
 	"distancedesktop/captured/pipelines/macos"
+	"distancedesktop/captured/pipelines/windows"
 )
 
 var pipeline pipelines.Pipeline
+
+// socketPath returns the filesystem path for one of the daemon's unix
+// sockets. On Windows, AF_UNIX sockets still use filesystem paths, so the
+// sockets land in the temp dir instead of /tmp.
+func socketPath(name string) string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(os.TempDir(), name)
+	}
+	return filepath.Join("/tmp", name)
+}
 
 func main() {
 	listen := flag.String("listen", "", "TCP address for remote control (e.g. :9090)")
@@ -30,6 +42,8 @@ func main() {
 		pipeline = macos.New()
 	case "linux":
 		pipeline = linux.New(*source)
+	case "windows":
+		pipeline = windows.New()
 	default:
 		log.Fatalf("unsupported platform: %s", runtime.GOOS)
 	}
@@ -37,12 +51,15 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	os.Remove("/tmp/captured.socket")
-	ul, err := net.Listen("unix", "/tmp/captured.socket")
+	controlSock := socketPath("captured.socket")
+	mediaSock := socketPath("captured-media.socket")
+
+	os.Remove(controlSock)
+	ul, err := net.Listen("unix", controlSock)
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Println("unix: /tmp/captured.socket")
+	log.Println("unix:", controlSock)
 
 	var tl net.Listener
 	if *listen != "" {
@@ -93,8 +110,8 @@ func main() {
 					continue
 				}
 				stream = s
-				os.Remove("/tmp/captured-media.socket")
-				ml, err := net.Listen("unix", "/tmp/captured-media.socket")
+				os.Remove(mediaSock)
+				ml, err := net.Listen("unix", mediaSock)
 				if err != nil {
 					stream.Close()
 					stream = nil
@@ -126,7 +143,7 @@ func main() {
 				streamMu.Unlock()
 				enc.Encode(map[string]any{
 					"type":   "stream-started",
-					"socket": "/tmp/captured-media.socket",
+					"socket": mediaSock,
 					"format": "bgra",
 				})
 
@@ -136,7 +153,7 @@ func main() {
 					stream.Close()
 					stream = nil
 				}
-				// os.Remove("/tmp/captured-media.socket") - do NOT fucking do this
+				// os.Remove(mediaSock) - do NOT fucking do this
 				streamMu.Unlock()
 				enc.Encode(map[string]string{"type": "stream-stopped"})
 
@@ -184,5 +201,5 @@ func main() {
 		stream.Close()
 	}
 	streamMu.Unlock()
-	os.Remove("/tmp/captured-media.socket")
+	os.Remove(mediaSock)
 }
