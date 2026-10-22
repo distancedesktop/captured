@@ -324,4 +324,51 @@ func primeFD(fd int, handle uint32) (int, error) {
 	return int(out), nil
 }
 
+// fbIdentity returns the inode of plane 0's dma-buf. Framebuffer IDs get
+// reused once freed, so a cached import is only valid while this matches.
+func fbIdentity(fd int, fbID uint32) (uint64, error) {
+	fb, err := getFB2(fd, fbID)
+	if err != nil {
+		return 0, err
+	}
+	defer closeFBHandles(fd, fb)
+	if fb.Handles[0] == 0 {
+		return 0, fmt.Errorf("%s", errNeedsCapSysAdmin)
+	}
+	buf, err := primeFD(fd, fb.Handles[0])
+	if err != nil {
+		return 0, err
+	}
+	defer syscall.Close(buf)
+	var st syscall.Stat_t
+	if err := syscall.Fstat(buf, &st); err != nil {
+		return 0, err
+	}
+	return st.Ino, nil
+}
+
+// probeFBHandles checks that the kernel hands this process GEM handles for
+// the output's framebuffer; without CAP_SYS_ADMIN they come back as zero.
+func probeFBHandles(o kmsOutput) error {
+	f, err := os.OpenFile(o.Card, os.O_RDWR|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	fd := int(f.Fd())
+	id, err := currentFB(fd, o.CrtcID)
+	if err != nil {
+		return err
+	}
+	fb, err := getFB2(fd, id)
+	if err != nil {
+		return err
+	}
+	closeFBHandles(fd, fb)
+	if fb.Handles[0] == 0 {
+		return fmt.Errorf("%s", errNeedsCapSysAdmin)
+	}
+	return nil
+}
+
 const errNeedsCapSysAdmin = "the kernel hides framebuffer handles from this process: give the binary CAP_SYS_ADMIN (sudo setcap cap_sys_admin+ep captured), the same thing Sunshine's KMS capture needs"

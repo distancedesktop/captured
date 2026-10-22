@@ -53,3 +53,11 @@ func TestOpenErrorIsReturned(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestClampFPS(t *testing.T) {
+	for in, want := range map[int]int{0: 60, -5: 60, 30: 30, 2_000_000_000: maxFPS} {
+		if got := clampFPS(in); got != want {
+			t.Errorf("clampFPS(%d) = %d, want %d", in, got, want)
+		}
+	}
+}

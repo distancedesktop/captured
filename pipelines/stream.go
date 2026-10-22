@@ -26,6 +26,19 @@ type interrupter interface {
 	interrupt()
 }
 
+const maxFPS = 1000
+
+// clampFPS turns a requested rate into a usable one: 0 means 60.
+func clampFPS(fps int) int {
+	switch {
+	case fps <= 0:
+		return 60
+	case fps > maxFPS:
+		return maxFPS
+	}
+	return fps
+}
+
 type Stats struct {
 	Frames    uint64  `json:"frames"`
 	Dropped   uint64  `json:"dropped"`
@@ -84,9 +97,7 @@ type stream struct {
 // The output channel holds one frame. When the consumer falls behind, the
 // stale frame is dropped instead of queueing, so latency can't build up here.
 func startStream(ctx context.Context, open func() (grabber, error), fps int, paced bool) (Stream, error) {
-	if fps <= 0 {
-		fps = 60
-	}
+	fps = clampFPS(fps)
 	ctx, cancel := context.WithCancel(ctx)
 	s := &stream{out: make(chan *Frame, 1), cancel: cancel, done: make(chan struct{})}
 	opened := make(chan error, 1)

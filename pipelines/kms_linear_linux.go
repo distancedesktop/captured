@@ -29,7 +29,7 @@ func (kmsLinear) Probe(ctx context.Context) error {
 	if len(outs) == 0 {
 		return fmt.Errorf("no lit non-NVIDIA KMS outputs")
 	}
-	return nil
+	return probeFBHandles(outs[0])
 }
 
 func (kmsLinear) ListDisplays(ctx context.Context) ([]Display, error) {
@@ -54,8 +54,11 @@ func (kmsLinear) Start(ctx context.Context, displayID uint32, fps int) (Stream, 
 }
 
 type linearFB struct {
-	mem   []byte
-	pitch int
+	ino     uint64
+	mapping []byte
+	mem     []byte
+	pitch   int
+	opaque  bool // XRGB: the X byte is undefined, force alpha to 0xff
 }
 
 type kmsLinearGrabber struct {
@@ -84,8 +87,16 @@ func openKMSLinear(o kmsOutput) (grabber, error) {
 }
 
 func (g *kmsLinearGrabber) fb(id uint32) (*linearFB, error) {
+	ino, err := fbIdentity(g.fd, id)
+	if err != nil {
+		return nil, err
+	}
 	if m, ok := g.fbs[id]; ok {
-		return m, nil
+		if m.ino == ino {
+			return m, nil
+		}
+		syscall.Munmap(m.mapping)
+		delete(g.fbs, id)
 	}
 	fb, err := getFB2(g.fd, id)
 	if err != nil {
@@ -108,21 +119,22 @@ func (g *kmsLinearGrabber) fb(id uint32) (*linearFB, error) {
 	}
 	defer syscall.Close(dmabuf)
 	pitch := int(fb.Pitches[0])
-	mem, err := syscall.Mmap(dmabuf, int64(fb.Offsets[0]), pitch*g.h, syscall.PROT_READ, syscall.MAP_SHARED)
+	off := int(fb.Offsets[0])
+	mapping, err := syscall.Mmap(dmabuf, 0, off+pitch*g.h, syscall.PROT_READ, syscall.MAP_SHARED)
 	if err != nil {
 		return nil, fmt.Errorf("mmap scanout: %w", err)
 	}
 	if len(g.fbs) >= 4 {
 		g.dropFBs()
 	}
-	m := &linearFB{mem: mem, pitch: pitch}
+	m := &linearFB{ino: ino, mapping: mapping, mem: mapping[off:], pitch: pitch, opaque: fb.PixelFormat == drmFormatXRGB8888}
 	g.fbs[id] = m
 	return m, nil
 }
 
 func (g *kmsLinearGrabber) dropFBs() {
 	for id, m := range g.fbs {
-		syscall.Munmap(m.mem)
+		syscall.Munmap(m.mapping)
 		delete(g.fbs, id)
 	}
 }
@@ -142,12 +154,21 @@ func (g *kmsLinearGrabber) grab(dst []byte) error {
 	row := g.w * 4
 	if m.pitch == row {
 		copy(dst, m.mem[:row*g.h])
-		return nil
+	} else {
+		for y := 0; y < g.h; y++ {
+			copy(dst[y*row:(y+1)*row], m.mem[y*m.pitch:y*m.pitch+row])
+		}
 	}
-	for y := 0; y < g.h; y++ {
-		copy(dst[y*row:(y+1)*row], m.mem[y*m.pitch:y*m.pitch+row])
+	if m.opaque {
+		setOpaque(dst)
 	}
 	return nil
+}
+
+func setOpaque(px []byte) {
+	for i := 3; i < len(px); i += 4 {
+		px[i] = 0xff
+	}
 }
 
 func (g *kmsLinearGrabber) close() error {

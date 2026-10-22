@@ -36,6 +36,7 @@ func (screenCaptureKit) ListDisplays(ctx context.Context) ([]Display, error) {
 }
 
 func (screenCaptureKit) Start(ctx context.Context, displayID uint32, fps int) (Stream, error) {
+	fps = clampFPS(fps)
 	ds, err := sckit.ListDisplays(ctx)
 	if err != nil {
 		return nil, err

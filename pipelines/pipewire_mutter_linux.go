@@ -92,9 +92,11 @@ func mutterMonitors(ctx context.Context) ([]mutterMonitor, error) {
 		return nil, fmt.Errorf("GetCurrentState: %w", err)
 	}
 	pos := map[string][2]int{}
+	rotated := map[string]bool{}
 	for _, l := range logical {
 		for _, m := range l.Monitors {
 			pos[m.Connector] = [2]int{int(l.X), int(l.Y)}
+			rotated[m.Connector] = l.Transform%2 == 1 // 90/270, flipped or not
 		}
 	}
 	var out []mutterMonitor
@@ -105,7 +107,11 @@ func mutterMonitors(ctx context.Context) ([]mutterMonitor, error) {
 		}
 		for _, mode := range m.Modes {
 			if cur, _ := mode.Props["is-current"].Value().(bool); cur {
-				out = append(out, mutterMonitor{m.Spec.Connector, int(mode.Width), int(mode.Height), mode.Refresh, p[0], p[1]})
+				w, h := int(mode.Width), int(mode.Height)
+				if rotated[m.Spec.Connector] {
+					w, h = h, w
+				}
+				out = append(out, mutterMonitor{m.Spec.Connector, w, h, mode.Refresh, p[0], p[1]})
 				break
 			}
 		}

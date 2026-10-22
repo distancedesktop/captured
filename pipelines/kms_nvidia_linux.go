@@ -38,7 +38,7 @@ func (kmsNvidia) Probe(ctx context.Context) error {
 	if len(outs) == 0 {
 		return fmt.Errorf("no lit outputs on an nvidia-drm device")
 	}
-	return nil
+	return probeFBHandles(outs[0])
 }
 
 func (kmsNvidia) ListDisplays(ctx context.Context) ([]Display, error) {
@@ -63,6 +63,7 @@ func (kmsNvidia) Start(ctx context.Context, displayID uint32, fps int) (Stream, 
 }
 
 type gpuFB struct {
+	ino uint64
 	img uintptr
 	tex uint32
 	fbo uint32
@@ -113,8 +114,16 @@ func openKMSNvidia(o kmsOutput) (grabber, error) {
 }
 
 func (g *kmsNvidiaGrabber) fb(id uint32) (*gpuFB, error) {
+	ino, err := fbIdentity(g.fd, id)
+	if err != nil {
+		return nil, err
+	}
 	if f, ok := g.fbs[id]; ok {
-		return f, nil
+		if f.ino == ino {
+			return f, nil
+		}
+		g.freeFB(f)
+		delete(g.fbs, id)
 	}
 	fb, err := getFB2(g.fd, id)
 	if err != nil {
@@ -147,7 +156,7 @@ func (g *kmsNvidiaGrabber) fb(id uint32) (*gpuFB, error) {
 	if err != nil {
 		return nil, err
 	}
-	f := &gpuFB{img: img}
+	f := &gpuFB{img: img, ino: ino}
 	glGenTextures(1, &f.tex)
 	glBindTexture(glTexture2D, f.tex)
 	glTexParameteri(glTexture2D, glTextureMinFilter, glNearest)

@@ -20,11 +20,15 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"distancedesktop/captured/pipelines"
 )
 
-const version = "0.2.0"
+const (
+	version           = "0.2.0"
+	firstFrameTimeout = 5 * time.Second
+)
 
 var (
 	controlPath = flag.String("socket", "/tmp/captured.socket", "control socket path")
@@ -211,7 +215,14 @@ func (s *server) start(display uint32, fps int) (any, error) {
 	s.stream, s.media = st, ml
 
 	// Grab the size from the first frame so the reply can carry it.
-	first, ok := <-st.Frames()
+	var first *pipelines.Frame
+	ok := true
+	select {
+	case first, ok = <-st.Frames():
+	case <-time.After(firstFrameTimeout):
+		s.stopLocked()
+		return nil, fmt.Errorf("no frame within %v", firstFrameTimeout)
+	}
 	if !ok {
 		s.stopLocked()
 		if e := st.Stats().Err; e != "" {
