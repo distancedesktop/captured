@@ -1,188 +1,287 @@
+// captured: a dumb capture daemon. It grabs a display and hands out raw BGRA
+// frames; encoding and everything else is the agent's job.
+//
+// Control: JSON lines on a unix socket (and optionally TCP).
+// Media:   [u32 BE width][u32 BE height][width*height*4 BGRA] per frame, on a
+//
+//	unix socket that exists while a stream is running.
 package main
 
 import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net"
 	"os"
 	"os/signal"
-	"runtime"
 	"sync"
+	"syscall"
 
 	"distancedesktop/captured/pipelines"
-	"distancedesktop/captured/pipelines/linux"
-	"distancedesktop/captured/pipelines/macos"
 )
 
-var pipeline pipelines.Pipeline
+const version = "0.2.0"
+
+var (
+	controlPath = flag.String("socket", "/tmp/captured.socket", "control socket path")
+	mediaPath   = flag.String("media-socket", "/tmp/captured-media.socket", "media socket path")
+	listenTCP   = flag.String("listen", "", "also accept control connections on this TCP address (e.g. :9090)")
+	pipeName    = flag.String("pipeline", "auto", "capture pipeline, or auto")
+	listOnly    = flag.Bool("list", false, "print pipelines and their displays, then exit")
+)
+
+type request struct {
+	Type      string `json:"type"`
+	DisplayID uint32 `json:"display_id"`
+	FPS       int    `json:"fps"`
+}
+
+type server struct {
+	ctx  context.Context
+	pipe pipelines.Pipeline
+
+	mu     sync.Mutex
+	stream pipelines.Stream
+	media  net.Listener
+}
 
 func main() {
-	listen := flag.String("listen", "", "TCP address for remote control (e.g. :9090)")
-	source := flag.String("source", "kms", "capture source on linux: kms|pipewire|x11")
 	flag.Parse()
-
-	switch runtime.GOOS {
-	case "darwin":
-		pipeline = macos.New()
-	case "linux":
-		pipeline = linux.New(*source)
-	default:
-		log.Fatalf("unsupported platform: %s", runtime.GOOS)
-	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	os.Remove("/tmp/captured.socket")
-	ul, err := net.Listen("unix", "/tmp/captured.socket")
+	if *listOnly {
+		list(ctx)
+		return
+	}
+
+	pipe, err := choose(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Println("unix: /tmp/captured.socket")
+	log.Printf("pipeline: %s", pipe.Name())
 
-	var tl net.Listener
-	if *listen != "" {
-		tl, err = net.Listen("tcp", *listen)
+	s := &server{ctx: ctx, pipe: pipe}
+	os.Remove(*controlPath)
+	ul, err := net.Listen("unix", *controlPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("control: %s", *controlPath)
+	go s.accept(ul)
+	if *listenTCP != "" {
+		tl, err := net.Listen("tcp", *listenTCP)
 		if err != nil {
 			log.Fatal(err)
 		}
-		log.Printf("tcp: %s", *listen)
-	}
-
-	var stream pipelines.FrameStream
-	var streamMu sync.Mutex
-
-	serveConn := func(conn net.Conn) {
-		defer conn.Close()
-		dec := json.NewDecoder(conn)
-		enc := json.NewEncoder(conn)
-		for {
-			var req struct {
-				Type      string `json:"type"`
-				DisplayID uint32 `json:"display_id,omitempty"`
-				FPS       int    `json:"fps,omitempty"`
-			}
-			if err := dec.Decode(&req); err != nil {
-				return
-			}
-			switch req.Type {
-			case "list-displays":
-				displays, err := pipeline.ListDisplays(ctx)
-				if err != nil {
-					enc.Encode(map[string]string{"error": err.Error()})
-					continue
-				}
-				enc.Encode(map[string]any{"type": "displays", "displays": displays})
-
-			case "start-stream":
-				if req.FPS == 0 {
-					req.FPS = 60
-				}
-				streamMu.Lock()
-				if stream != nil {
-					stream.Close()
-				}
-				s, err := pipeline.StartStream(ctx, req.DisplayID, req.FPS)
-				if err != nil {
-					streamMu.Unlock()
-					enc.Encode(map[string]string{"error": err.Error()})
-					continue
-				}
-				stream = s
-				os.Remove("/tmp/captured-media.socket")
-				ml, err := net.Listen("unix", "/tmp/captured-media.socket")
-				if err != nil {
-					stream.Close()
-					stream = nil
-					streamMu.Unlock()
-					enc.Encode(map[string]string{"error": err.Error()})
-					continue
-				}
-				go func() {
-					<-ctx.Done()
-					ml.Close()
-				}()
-				go func() {
-					mc, err := ml.Accept()
-					ml.Close()
-					if err != nil {
-						return
-					}
-					defer mc.Close()
-					for f := range s.Frames() {
-						buf := make([]byte, 8+len(f.Data))
-						binary.BigEndian.PutUint32(buf[0:4], uint32(f.Width))
-						binary.BigEndian.PutUint32(buf[4:8], uint32(f.Height))
-						copy(buf[8:], f.Data)
-						if _, err := mc.Write(buf); err != nil {
-							return
-						}
-					}
-				}()
-				streamMu.Unlock()
-				enc.Encode(map[string]any{
-					"type":   "stream-started",
-					"socket": "/tmp/captured-media.socket",
-					"format": "bgra",
-				})
-
-			case "stop-stream":
-				streamMu.Lock()
-				if stream != nil {
-					stream.Close()
-					stream = nil
-				}
-				// os.Remove("/tmp/captured-media.socket") - do NOT fucking do this
-				streamMu.Unlock()
-				enc.Encode(map[string]string{"type": "stream-stopped"})
-
-			case "info":
-				formats := pipeline.SupportedFormats()
-				s := make([]string, len(formats))
-				for i, f := range formats {
-					s[i] = string(f)
-				}
-				enc.Encode(map[string]any{
-					"type":    "info",
-					"formats": s,
-					"version": "0.1.0",
-				})
-
-			default:
-				enc.Encode(map[string]string{"error": fmt.Sprintf("unknown type: %s", req.Type)})
-			}
-		}
-	}
-
-	accept := func(l net.Listener) {
-		for {
-			conn, err := l.Accept()
-			if err != nil {
-				return
-			}
-			go serveConn(conn)
-		}
-	}
-
-	go accept(ul)
-	if tl != nil {
-		go accept(tl)
+		log.Printf("control: tcp %s", tl.Addr())
+		go s.accept(tl)
 	}
 
 	<-ctx.Done()
 	ul.Close()
-	if tl != nil {
-		tl.Close()
-	}
+	s.stop()
+	os.Remove(*controlPath)
+	os.Remove(*mediaPath)
+}
 
-	streamMu.Lock()
-	if stream != nil {
-		stream.Close()
+func choose(ctx context.Context) (pipelines.Pipeline, error) {
+	if *pipeName != "auto" {
+		p, err := pipelines.Get(*pipeName)
+		if err != nil {
+			return nil, err
+		}
+		if err := p.Probe(ctx); err != nil {
+			return nil, fmt.Errorf("%s: %w", p.Name(), err)
+		}
+		return p, nil
 	}
-	streamMu.Unlock()
-	os.Remove("/tmp/captured-media.socket")
+	p, skipped := pipelines.Auto(ctx)
+	for _, err := range skipped {
+		log.Printf("skipped %v", err)
+	}
+	if p == nil {
+		return nil, pipelines.ErrNoPipeline
+	}
+	return p, nil
+}
+
+func list(ctx context.Context) {
+	for _, p := range pipelines.All() {
+		if err := p.Probe(ctx); err != nil {
+			fmt.Printf("%s: unavailable: %v\n", p.Name(), err)
+			continue
+		}
+		ds, err := p.ListDisplays(ctx)
+		if err != nil {
+			fmt.Printf("%s: %v\n", p.Name(), err)
+			continue
+		}
+		fmt.Printf("%s:\n", p.Name())
+		for _, d := range ds {
+			fmt.Printf("  %d %s %dx%d@%.2f +%d+%d\n", d.ID, d.Name, d.Width, d.Height, d.RefreshRate, d.X, d.Y)
+		}
+	}
+}
+
+func (s *server) accept(l net.Listener) {
+	for {
+		c, err := l.Accept()
+		if err != nil {
+			return
+		}
+		go s.serve(c)
+	}
+}
+
+func (s *server) serve(c net.Conn) {
+	defer c.Close()
+	dec := json.NewDecoder(c)
+	enc := json.NewEncoder(c)
+	for {
+		var req request
+		if err := dec.Decode(&req); err != nil {
+			return
+		}
+		resp, err := s.handle(req)
+		if err != nil {
+			resp = map[string]any{"type": "error", "error": err.Error()}
+		}
+		if enc.Encode(resp) != nil {
+			return
+		}
+	}
+}
+
+func (s *server) handle(req request) (any, error) {
+	switch req.Type {
+	case "list-displays":
+		ds, err := s.pipe.ListDisplays(s.ctx)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"type": "displays", "displays": ds}, nil
+	case "start-stream":
+		return s.start(req.DisplayID, req.FPS)
+	case "stop-stream":
+		s.stop()
+		return map[string]any{"type": "stream-stopped"}, nil
+	case "stats":
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.stream == nil {
+			return map[string]any{"type": "stats", "streaming": false}, nil
+		}
+		return map[string]any{"type": "stats", "streaming": true, "stats": s.stream.Stats()}, nil
+	case "info":
+		names := []string{}
+		for _, p := range pipelines.All() {
+			names = append(names, p.Name())
+		}
+		return map[string]any{
+			"type":      "info",
+			"version":   version,
+			"formats":   []pipelines.Format{pipelines.FormatBGRA},
+			"pipeline":  s.pipe.Name(),
+			"pipelines": names,
+		}, nil
+	}
+	return nil, fmt.Errorf("unknown type: %s", req.Type)
+}
+
+func (s *server) start(display uint32, fps int) (any, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stopLocked()
+
+	st, err := s.pipe.Start(s.ctx, display, fps)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", s.pipe.Name(), err)
+	}
+	os.Remove(*mediaPath)
+	ml, err := net.Listen("unix", *mediaPath)
+	if err != nil {
+		st.Close()
+		return nil, err
+	}
+	s.stream, s.media = st, ml
+
+	// Grab the size from the first frame so the reply can carry it.
+	first, ok := <-st.Frames()
+	if !ok {
+		s.stopLocked()
+		if e := st.Stats().Err; e != "" {
+			return nil, errors.New(e)
+		}
+		return nil, errors.New("stream ended before the first frame")
+	}
+	go s.pump(st, ml, first)
+	return map[string]any{
+		"type":     "stream-started",
+		"socket":   *mediaPath,
+		"format":   pipelines.FormatBGRA,
+		"pipeline": s.pipe.Name(),
+		"width":    first.Width,
+		"height":   first.Height,
+	}, nil
+}
+
+// pump serves one media client. When it goes away the stream stops, so
+// nothing keeps capturing for nobody.
+func (s *server) pump(st pipelines.Stream, ml net.Listener, first *pipelines.Frame) {
+	defer func() {
+		s.mu.Lock()
+		if s.stream == st {
+			s.stopLocked()
+		}
+		s.mu.Unlock()
+	}()
+	c, err := ml.Accept()
+	ml.Close()
+	if err != nil {
+		first.Release()
+		return
+	}
+	defer c.Close()
+	hdr := make([]byte, 8)
+	write := func(f *pipelines.Frame) error {
+		defer f.Release()
+		binary.BigEndian.PutUint32(hdr[0:4], uint32(f.Width))
+		binary.BigEndian.PutUint32(hdr[4:8], uint32(f.Height))
+		bufs := net.Buffers{hdr, f.Data}
+		_, err := bufs.WriteTo(c)
+		return err
+	}
+	if write(first) != nil {
+		return
+	}
+	for f := range st.Frames() {
+		if write(f) != nil {
+			return
+		}
+	}
+	if e := st.Stats().Err; e != "" {
+		log.Printf("stream ended: %s", e)
+	}
+}
+
+func (s *server) stop() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stopLocked()
+}
+
+func (s *server) stopLocked() {
+	if s.media != nil {
+		s.media.Close()
+		s.media = nil
+	}
+	if s.stream != nil {
+		s.stream.Close()
+		s.stream = nil
+	}
 }
