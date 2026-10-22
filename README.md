@@ -12,8 +12,9 @@ A dumb capture daemon. It grabs a display and hands raw BGRA frames to whoever a
 | `pipewire_mutter` | `pipewire_mutter_linux.go` | GNOME Mutter ScreenCast → PipeWire → `gst-launch-1.0`. Cursor included. Frames only arrive when the screen changes. Run as the desktop user. |
 | `kms_linear` | `kms_linear_linux.go` | Maps a linear scanout buffer and copies it (virtio-gpu, simpledrm, some iGPUs). Refuses tiled buffers. |
 | `screencapturekit` | `screencapturekit_darwin.go` | macOS ScreenCaptureKit via sckit-go. |
+| `dxgi` | `dxgi_windows.go` | Windows DXGI Desktop Duplication, staging texture copy. No cursor. Repeats the last frame when the screen is idle and recreates the duplication on access loss (UAC, mode change, fullscreen). |
 
-Shared bits: `pipeline.go` (interface + registry), `stream.go` (pacing, buffer reuse, dropping stale frames), `drm_linux.go`, `egl_linux.go`. Every native library is loaded at runtime with purego, so there's no cgo.
+Shared bits: `pipeline.go` (interface + registry), `stream.go` (pacing, buffer reuse, dropping stale frames), `drm_linux.go`, `egl_linux.go`. Every native library is loaded at runtime (purego, or golang.org/x/sys/windows on Windows), so there's no cgo.
 
 Nothing falls back to a fake image. If a pipeline can't capture, it says why.
 
@@ -27,7 +28,7 @@ sudo setcap cap_sys_admin+ep captured  # for kms_nvidia, same as Sunshine's KMS 
 ./captured --pipeline pipewire_mutter
 ```
 
-Flags: `--pipeline`, `--socket` (`/tmp/captured.socket`), `--media-socket` (`/tmp/captured-media.socket`), `--listen :9090` for TCP control, `--list`.
+Flags: `--pipeline`, `--socket` (`/tmp/captured.socket`), `--media-socket` (`/tmp/captured-media.socket`; on Windows `%TEMP%\captured.socket` and `%TEMP%\captured-media.socket`), `--listen :9090` for TCP control, `--list`.
 
 ## Protocol
 

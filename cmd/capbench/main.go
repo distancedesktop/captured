@@ -11,22 +11,23 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
+	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
 
-func cpuTicks(pid int) int64 {
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
-		return -1
+// defaultSocket matches captured's default socket paths.
+func defaultSocket(name string) string {
+	if runtime.GOOS != "windows" {
+		return "/tmp/" + name
 	}
-	s := string(b)
-	f := strings.Fields(s[strings.LastIndex(s, ")")+2:])
-	u, _ := strconv.ParseInt(f[11], 10, 64)
-	k, _ := strconv.ParseInt(f[12], 10, 64)
-	return u + k
+	dir := os.Getenv("TEMP")
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	return filepath.Join(dir, name)
 }
 
 func pct(d []float64, p float64) float64 {
@@ -43,9 +44,10 @@ func main() {
 	secs := flag.Float64("secs", 5, "seconds to read")
 	pid := flag.Int("pid", 0, "captured pid for cpu accounting")
 	dump := flag.String("dump", "", "write the last frame as raw BGRA here")
+	sock := flag.String("socket", defaultSocket("captured.socket"), "captured control socket")
 	flag.Parse()
 
-	c, err := net.Dial("unix", "/tmp/captured.socket")
+	c, err := net.Dial("unix", *sock)
 	if err != nil {
 		fmt.Println("control dial:", err)
 		os.Exit(1)
@@ -60,11 +62,17 @@ func main() {
 	fmt.Println("info:", call(map[string]any{"type": "info"}))
 	fmt.Println("displays:", call(map[string]any{"type": "list-displays"}))
 	t0 := time.Now()
-	fmt.Println("start:", call(map[string]any{"type": "start-stream", "display_id": *display, "fps": *fps}), "in", time.Since(t0))
+	started := call(map[string]any{"type": "start-stream", "display_id": *display, "fps": *fps})
+	fmt.Println("start:", started, "in", time.Since(t0))
+	media := defaultSocket("captured-media.socket")
+	var reply struct{ Socket string }
+	if json.Unmarshal([]byte(started), &reply) == nil && reply.Socket != "" {
+		media = reply.Socket
+	}
 
 	var m net.Conn
 	for i := 0; i < 50; i++ {
-		if m, err = net.Dial("unix", "/tmp/captured-media.socket"); err == nil {
+		if m, err = net.Dial("unix", media); err == nil {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -75,7 +83,7 @@ func main() {
 	}
 	mr := bufio.NewReaderSize(m, 1<<22)
 
-	cpu0 := cpuTicks(*pid)
+	cpu0 := cpuTime(*pid)
 	var gaps []float64
 	var last time.Time
 	var first time.Duration = -1
@@ -121,14 +129,14 @@ func main() {
 		bytes += int64(n)
 	}
 	el := time.Since(start).Seconds()
-	cpu1 := cpuTicks(*pid)
+	cpu1 := cpuTime(*pid)
 	fmt.Println("stats:", call(map[string]any{"type": "stats"}))
 	call(map[string]any{"type": "stop-stream"})
 	sort.Float64s(gaps)
 	fmt.Printf("frames=%d in %.2fs -> %.1f fps, %dx%d, %.1f MB/s, first frame after %v\n", frames, el, float64(frames)/el, w, h, float64(bytes)/el/1e6, first)
 	fmt.Printf("gap ms p50=%.2f p95=%.2f p99=%.2f max=%.2f; identical-to-previous=%d\n", pct(gaps, .5), pct(gaps, .95), pct(gaps, .99), pct(gaps, 1), dups)
 	if cpu0 >= 0 && cpu1 >= 0 {
-		fmt.Printf("captured cpu: %.0f%% of one core\n", float64(cpu1-cpu0)/100/el*100)
+		fmt.Printf("captured cpu: %.0f%% of one core\n", (cpu1-cpu0).Seconds()/el*100)
 	}
 	if *dump != "" && len(buf) > 0 {
 		os.WriteFile(*dump, buf, 0o644)

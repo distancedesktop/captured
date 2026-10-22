@@ -18,6 +18,8 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -31,12 +33,25 @@ const (
 )
 
 var (
-	controlPath = flag.String("socket", "/tmp/captured.socket", "control socket path")
-	mediaPath   = flag.String("media-socket", "/tmp/captured-media.socket", "media socket path")
+	controlPath = flag.String("socket", defaultSocket("captured.socket"), "control socket path")
+	mediaPath   = flag.String("media-socket", defaultSocket("captured-media.socket"), "media socket path")
 	listenTCP   = flag.String("listen", "", "also accept control connections on this TCP address (e.g. :9090)")
 	pipeName    = flag.String("pipeline", "auto", "capture pipeline, or auto")
 	listOnly    = flag.Bool("list", false, "print pipelines and their displays, then exit")
 )
+
+// defaultSocket is /tmp/<name>, or %TEMP%\<name> on Windows (AF_UNIX works
+// there from Windows 10 1803 on).
+func defaultSocket(name string) string {
+	if runtime.GOOS != "windows" {
+		return "/tmp/" + name
+	}
+	dir := os.Getenv("TEMP")
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	return filepath.Join(dir, name)
+}
 
 type request struct {
 	Type      string `json:"type"`
