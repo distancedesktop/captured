@@ -195,11 +195,7 @@ func (g *kmsNvidiaGrabber) freeFB(f *gpuFB) {
 func (g *kmsNvidiaGrabber) size() (int, int) { return g.w, g.h }
 
 func (g *kmsNvidiaGrabber) grab(dst []byte) error {
-	id, err := currentFB(g.fd, g.crtc)
-	if err != nil {
-		return err
-	}
-	f, err := g.fb(id)
+	f, err := scanoutFB(g.fd, g.crtc, g.fb)
 	if err != nil {
 		return err
 	}

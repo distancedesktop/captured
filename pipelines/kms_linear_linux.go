@@ -143,11 +143,7 @@ func (g *kmsLinearGrabber) size() (int, int) { return g.w, g.h }
 
 // XRGB8888 is B,G,R,X in memory, which already is BGRA byte order.
 func (g *kmsLinearGrabber) grab(dst []byte) error {
-	id, err := currentFB(g.fd, g.crtc)
-	if err != nil {
-		return err
-	}
-	m, err := g.fb(id)
+	m, err := scanoutFB(g.fd, g.crtc, g.fb)
 	if err != nil {
 		return err
 	}

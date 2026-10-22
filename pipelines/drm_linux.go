@@ -324,6 +324,21 @@ func primeFD(fd int, handle uint32) (int, error) {
 	return int(out), nil
 }
 
+// scanoutFB resolves the CRTC's current framebuffer through get, retrying when
+// a page flip frees the framebuffer between reading its ID and importing it.
+func scanoutFB[T any](fd int, crtc uint32, get func(uint32) (T, error)) (t T, err error) {
+	for range 3 {
+		var id uint32
+		if id, err = currentFB(fd, crtc); err != nil {
+			return t, err
+		}
+		if t, err = get(id); err == nil {
+			return t, nil
+		}
+	}
+	return t, err
+}
+
 // fbIdentity returns the inode of plane 0's dma-buf. Framebuffer IDs get
 // reused once freed, so a cached import is only valid while this matches.
 func fbIdentity(fd int, fbID uint32) (uint64, error) {
