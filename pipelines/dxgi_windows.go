@@ -43,13 +43,25 @@ func (dxgi) Probe(ctx context.Context) error {
 	if len(outs) == 0 {
 		return errors.New("no outputs attached to the desktop")
 	}
-	return onOwnThread(func() error {
-		g, err := openDXGI(outs[0], 60)
-		if err != nil {
-			return err
+	// Duplication can fail per output (e.g. an output on another adapter), so
+	// the pipeline is usable if any output opens.
+	var first error
+	for _, o := range outs {
+		err := onOwnThread(func() error {
+			g, err := openDXGI(o, 60)
+			if err != nil {
+				return err
+			}
+			return g.close()
+		})
+		if err == nil {
+			return nil
 		}
-		return g.close()
-	})
+		if first == nil {
+			first = err
+		}
+	}
+	return first
 }
 
 func (dxgi) ListDisplays(ctx context.Context) ([]Display, error) {
@@ -136,6 +148,7 @@ var (
 	procOpenInputDesktop              = user32.NewProc("OpenInputDesktop")
 	procSetThreadDesktop              = user32.NewProc("SetThreadDesktop")
 	procCloseDesktop                  = user32.NewProc("CloseDesktop")
+	procGetThreadDesktop              = user32.NewProc("GetThreadDesktop")
 	winmm                             = windows.NewLazySystemDLL("winmm.dll")
 	procTimeBeginPeriod               = winmm.NewProc("timeBeginPeriod")
 	procTimeEndPeriod                 = winmm.NewProc("timeEndPeriod")
@@ -487,6 +500,7 @@ type dxgiGrabber struct {
 	dup    *com // IDXGIOutputDuplication, nil while the desktop is out of reach
 	stage  *com // staging ID3D11Texture2D
 	desk   uintptr
+	orig   uintptr // the thread's desktop before useInputDesktop; not ours to close
 
 	w, h   int // as the user sees it
 	tw, th int // as the texture is laid out (unrotated scanout)
@@ -557,6 +571,9 @@ func (g *dxgiGrabber) useInputDesktop() {
 	h, _, _ := procOpenInputDesktop.Call(0, 0, genericAll)
 	if h == 0 {
 		return
+	}
+	if g.orig == 0 {
+		g.orig, _, _ = procGetThreadDesktop.Call(uintptr(windows.GetCurrentThreadId()))
 	}
 	if r, _, _ := procSetThreadDesktop.Call(h); r == 0 {
 		procCloseDesktop.Call(h)
@@ -749,6 +766,10 @@ func (g *dxgiGrabber) close() error {
 	g.out1.release()
 	g.stage, g.dup, g.ctx, g.dev, g.out1 = nil, nil, nil, nil, nil
 	if g.desk != 0 {
+		// CloseDesktop fails while this thread is still assigned to the desktop.
+		if g.orig != 0 {
+			procSetThreadDesktop.Call(g.orig)
+		}
 		procCloseDesktop.Call(g.desk)
 		g.desk = 0
 	}
