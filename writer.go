@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -115,6 +116,9 @@ func (w *writer) format(js []byte) {
 
 // packet copies p into the queue. Called on the capture thread.
 func (w *writer) packet(p av.Packet) error {
+	if e, _ := w.err.Load().(string); e != "" {
+		return errors.New("media output: " + e)
+	}
 	if w.waitKey.Load() {
 		if !p.Key {
 			w.dropped.Add(1)
