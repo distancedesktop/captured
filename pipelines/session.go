@@ -174,6 +174,9 @@ type encoder struct {
 }
 
 func (s *session) closeEncoder(g grabber, e *encoder) {
+	if e.Encoder == nil {
+		return
+	}
 	if e.dev != nil {
 		g.(gpuGrabber).unbindHW()
 	}
