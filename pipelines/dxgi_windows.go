@@ -72,7 +72,7 @@ func (dxgi) ListDisplays(ctx context.Context) ([]Display, error) {
 	return dxgiDisplays(outs), nil
 }
 
-func (dxgi) Start(ctx context.Context, displayID uint32, fps int) (Stream, error) {
+func (dxgi) Start(ctx context.Context, displayID uint32, cfg Config) (Session, error) {
 	outs, err := dxgiOutputs()
 	if err != nil {
 		return nil, err
@@ -82,7 +82,7 @@ func (dxgi) Start(ctx context.Context, displayID uint32, fps int) (Stream, error
 		return nil, err
 	}
 	o := outs[i]
-	return startStream(ctx, func() (grabber, error) { return openDXGI(o, fps) }, fps, false)
+	return startSession(ctx, func() (grabber, error) { return openDXGI(o, cfg.FPS) }, cfg, false)
 }
 
 // COM plumbing. A COM object is a pointer to a vtable pointer.

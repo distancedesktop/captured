@@ -40,7 +40,7 @@ func (kmsLinear) ListDisplays(ctx context.Context) ([]Display, error) {
 	return kmsDisplays(outs), nil
 }
 
-func (kmsLinear) Start(ctx context.Context, displayID uint32, fps int) (Stream, error) {
+func (kmsLinear) Start(ctx context.Context, displayID uint32, cfg Config) (Session, error) {
 	outs, err := scanKMS(notNvidia)
 	if err != nil {
 		return nil, err
@@ -50,7 +50,7 @@ func (kmsLinear) Start(ctx context.Context, displayID uint32, fps int) (Stream, 
 		return nil, err
 	}
 	o := outs[i]
-	return startStream(ctx, func() (grabber, error) { return openKMSLinear(o) }, fps, true)
+	return startSession(ctx, func() (grabber, error) { return openKMSLinear(o) }, cfg, true)
 }
 
 type linearFB struct {

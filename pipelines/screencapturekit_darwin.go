@@ -76,8 +76,8 @@ func (screenCaptureKit) ListDisplays(ctx context.Context) ([]Display, error) {
 	return out, nil
 }
 
-func (screenCaptureKit) Start(ctx context.Context, displayID uint32, fps int) (Stream, error) {
-	fps = clampFPS(fps)
+func (screenCaptureKit) Start(ctx context.Context, displayID uint32, cfg Config) (Session, error) {
+	fps := clampFPS(cfg.FPS)
 	ds, err := sckDisplays(ctx)
 	if err != nil {
 		return nil, err
@@ -91,13 +91,13 @@ func (screenCaptureKit) Start(ctx context.Context, displayID uint32, fps int) (S
 		return nil, err
 	}
 	d := ds[i]
-	return startStream(ctx, func() (grabber, error) {
+	return startSession(ctx, func() (grabber, error) {
 		st, err := sckit.NewStream(ctx, d.sck, sckit.WithFrameRate(fps), sckit.WithResolution(d.Width, d.Height))
 		if err != nil {
 			return nil, err
 		}
 		return &sckGrabber{st: st, ctx: ctx, w: st.Width(), h: st.Height()}, nil
-	}, fps, false)
+	}, cfg, false)
 }
 
 // sckit.Stream isn't safe to Close while another thread is inside

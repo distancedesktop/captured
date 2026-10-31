@@ -135,7 +135,7 @@ func (pipewireMutter) ListDisplays(ctx context.Context) ([]Display, error) {
 	return mutterDisplays(ms), nil
 }
 
-func (pipewireMutter) Start(ctx context.Context, displayID uint32, fps int) (Stream, error) {
+func (pipewireMutter) Start(ctx context.Context, displayID uint32, cfg Config) (Session, error) {
 	ms, err := mutterMonitors(ctx)
 	if err != nil {
 		return nil, err
@@ -145,7 +145,7 @@ func (pipewireMutter) Start(ctx context.Context, displayID uint32, fps int) (Str
 		return nil, err
 	}
 	m := ms[i]
-	return startStream(ctx, func() (grabber, error) { return openPipewireMutter(ctx, m, fps) }, fps, false)
+	return startSession(ctx, func() (grabber, error) { return openPipewireMutter(ctx, m, clampFPS(cfg.FPS)) }, cfg, false)
 }
 
 type pipewireGrabber struct {

@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"time"
 )
 
 type Display struct {
@@ -23,40 +22,13 @@ type Display struct {
 	RefreshRate float64 `json:"refresh_rate"`
 }
 
-type Format string
-
-const FormatBGRA Format = "bgra"
-
-// Frame is one tightly packed BGRA image (len(Data) == Width*Height*4).
-// Call Release once the bytes have been written out so the buffer is reused.
-type Frame struct {
-	Data     []byte
-	Width    int
-	Height   int
-	Seq      uint64
-	Captured time.Time
-	pool     *bufPool
-}
-
-func (f *Frame) Release() {
-	if f.pool != nil {
-		f.pool.put(f.Data)
-		f.pool = nil
-	}
-}
-
-type Stream interface {
-	Frames() <-chan *Frame
-	Stats() Stats
-	Close() error
-}
-
 type Pipeline interface {
 	Name() string
 	// Probe returns nil when the pipeline can run on this machine right now.
 	Probe(ctx context.Context) error
 	ListDisplays(ctx context.Context) ([]Display, error)
-	Start(ctx context.Context, displayID uint32, fps int) (Stream, error)
+	// Start captures the display and encodes it as cfg says until Close.
+	Start(ctx context.Context, displayID uint32, cfg Config) (Session, error)
 }
 
 var ErrNoPipeline = errors.New("no capture pipeline available on this machine")

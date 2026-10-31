@@ -49,7 +49,7 @@ func (kmsNvidia) ListDisplays(ctx context.Context) ([]Display, error) {
 	return kmsDisplays(outs), nil
 }
 
-func (kmsNvidia) Start(ctx context.Context, displayID uint32, fps int) (Stream, error) {
+func (kmsNvidia) Start(ctx context.Context, displayID uint32, cfg Config) (Session, error) {
 	outs, err := scanKMS(isNvidia)
 	if err != nil {
 		return nil, err
@@ -59,7 +59,7 @@ func (kmsNvidia) Start(ctx context.Context, displayID uint32, fps int) (Stream, 
 		return nil, err
 	}
 	o := outs[i]
-	return startStream(ctx, func() (grabber, error) { return openKMSNvidia(o) }, fps, true)
+	return startSession(ctx, func() (grabber, error) { return openKMSNvidia(o) }, cfg, true)
 }
 
 type gpuFB struct {

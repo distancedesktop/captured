@@ -95,7 +95,7 @@ func (d *HWDevice) Close() {
 type Frame struct{ f *C.AVFrame }
 
 func (f Frame) Data(i int) unsafe.Pointer { return unsafe.Pointer(f.f.data[i]) }
-func (f Frame) Linesize(i int) int       { return int(f.f.linesize[i]) }
+func (f Frame) Linesize(i int) int        { return int(f.f.linesize[i]) }
 
 // Bytes is the tight BGRA plane of a cpu frame.
 func (f Frame) Bytes() []byte {
@@ -107,17 +107,17 @@ func (f Frame) Free() { C.av_frame_free(&f.f) }
 
 // Config describes the encoder to open.
 type Config struct {
-	Encoder     string
-	SrcW, SrcH  int // what the capture produces
-	W, H        int // what gets encoded
-	FPS         int
-	Bitrate     int64
-	GOP         int // <= 0: only on request
-	Preset      string
-	Options     map[string]string
-	HW          *HWDevice // zero copy: caller fills frames on this device
-	HWFormat    PixFmt    // sw format of those hw frames
-	UploadDev   *HWDevice // cpu input into a hw-only encoder (vaapi)
+	Encoder    string
+	SrcW, SrcH int // what the capture produces
+	W, H       int // what gets encoded
+	FPS        int
+	Bitrate    int64
+	GOP        int // <= 0: only on request
+	Preset     string
+	Options    map[string]string
+	HW         *HWDevice // zero copy: caller fills frames on this device
+	HWFormat   PixFmt    // sw format of those hw frames
+	UploadDev  *HWDevice // cpu input into a hw-only encoder (vaapi)
 }
 
 type Packet struct {
