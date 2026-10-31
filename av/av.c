@@ -102,6 +102,7 @@ int cap_enc_open(cap_enc *e, const char *name, int src_w, int src_h, int w, int 
 		e->src_fmt = AV_PIX_FMT_BGR0;
 		int direct = w == src_w && h == src_h && (cap_supports(e->codec, AV_PIX_FMT_BGR0) || cap_supports(e->codec, AV_PIX_FMT_BGRA));
 		enum AVPixelFormat in = cap_supports(e->codec, AV_PIX_FMT_BGR0) ? AV_PIX_FMT_BGR0 : AV_PIX_FMT_BGRA;
+		e->cpu_fmt = direct ? in : AV_PIX_FMT_BGR0;
 		if (!direct) {
 			in = cap_first_sw(e->codec);
 			int hwonly = in == AV_PIX_FMT_NONE;
@@ -155,7 +156,7 @@ AVFrame *cap_enc_frame(cap_enc *e) {
 			av_frame_free(&f);
 		return f;
 	}
-	f->format = AV_PIX_FMT_BGR0;
+	f->format = e->cpu_fmt;
 	f->width = e->src_w;
 	f->height = e->src_h;
 	if (!(f->buf[0] = av_buffer_pool_get(e->cpu_pool))) {

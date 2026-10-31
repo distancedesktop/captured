@@ -17,6 +17,7 @@ typedef struct cap_enc {
 	AVPacket *pkt;
 	int src_w, src_h;
 	enum AVPixelFormat src_fmt; // what the caller fills
+	enum AVPixelFormat cpu_fmt; // label for cpu frames: bgr0, or bgra for encoders that only take that
 	int force_key;
 } cap_enc;
 
