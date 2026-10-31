@@ -1,5 +1,6 @@
 #include "av.h"
 #include <libavutil/imgutils.h>
+#include <string.h>
 
 static const enum AVPixelFormat *pix_fmts(const AVCodec *c) {
 #if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(61, 13, 100)
@@ -77,8 +78,10 @@ int cap_enc_open(cap_enc *e, const char *name, int src_w, int src_h, int w, int 
 	c->time_base = (AVRational){1, 1000000};
 	c->framerate = (AVRational){fps, 1};
 	c->bit_rate = bitrate;
-	c->rc_max_rate = bitrate;
-	c->rc_buffer_size = (int)(bitrate / fps);
+	if (strcmp(name, "libsvtav1") != 0) { // svt only takes maxrate with crf
+		c->rc_max_rate = bitrate;
+		c->rc_buffer_size = (int)(bitrate / fps);
+	}
 	c->gop_size = gop;
 	c->max_b_frames = 0;
 	c->flags |= AV_CODEC_FLAG_LOW_DELAY;

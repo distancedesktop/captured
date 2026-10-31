@@ -443,6 +443,7 @@ func (s *server) watch(sess pipelines.Session) {
 	mine := s.sess == sess
 	if mine {
 		s.sess, s.pipe = nil, nil
+		s.live.Store(nil)
 	}
 	s.mu.Unlock()
 	if mine {

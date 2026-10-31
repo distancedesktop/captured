@@ -206,7 +206,8 @@ func lowLatency(cfg Config) map[string]string {
 		if preset == "" {
 			preset = "12"
 		}
-		o["preset"] = preset
+		// low delay prediction, CBR
+		o["preset"], o["svtav1-params"] = preset, "pred-struct=1:rc=2"
 	case "vaapi":
 		o["rc_mode"] = "CBR"
 	case "qsv":
@@ -278,6 +279,9 @@ func (e *Encoder) LiveBitrate() bool {
 func (e *Encoder) SetBitrate(bps int64) {
 	c := e.e.ctx
 	c.bit_rate = C.int64_t(bps)
+	if c.rc_max_rate == 0 {
+		return
+	}
 	c.rc_max_rate = C.int64_t(bps)
 	if c.framerate.num > 0 {
 		c.rc_buffer_size = C.int(bps / int64(c.framerate.num))
@@ -310,7 +314,7 @@ func Candidates(codec string) []string {
 	case "hevc":
 		sw = []string{"libx265"}
 	case "av1":
-		sw = []string{"libsvtav1", "libaom-av1"}
+		sw = []string{"libsvtav1"} // libaom can't keep up in real time
 	}
 	for _, f := range []string{"nvenc", "amf", "qsv", "videotoolbox", "vaapi", "mf"} {
 		hw = append(hw, codec+"_"+f)
