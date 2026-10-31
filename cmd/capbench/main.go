@@ -126,7 +126,7 @@ func main() {
 	}
 	cmd := exec.Command(*bin)
 	cmd.Stderr = os.Stderr
-	cmd.ExtraFiles = []*os.File{mw}
+	passMedia(cmd, mw)
 	stdin, _ := cmd.StdinPipe()
 	stdout, _ := cmd.StdoutPipe()
 	if err := cmd.Start(); err != nil {
