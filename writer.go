@@ -93,10 +93,24 @@ func (w *writer) record(typ, flags byte, pts int64, payload []byte) []byte {
 	return append(b, payload...)
 }
 
-// format queues a format record; it never gets dropped.
+// format queues a format record. It never gets dropped and never blocks: if
+// the reader is stuck, older packets make room, since the new stream starts
+// on a keyframe anyway.
 func (w *writer) format(js []byte) {
-	w.q <- w.record(recFormat, 0, 0, js)
-	w.waitKey.Store(false)
+	rec := w.record(recFormat, 0, 0, js)
+	for {
+		select {
+		case w.q <- rec:
+			w.waitKey.Store(false)
+			return
+		default:
+		}
+		select {
+		case <-w.q:
+			w.dropped.Add(1)
+		default:
+		}
+	}
 }
 
 // packet copies p into the queue. Called on the capture thread.
