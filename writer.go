@@ -94,9 +94,9 @@ func (w *writer) record(typ, flags byte, pts int64, payload []byte) []byte {
 	return append(b, payload...)
 }
 
-// format queues a format record. It never gets dropped and never blocks: if
-// the reader is stuck, older packets make room, since the new stream starts
-// on a keyframe anyway.
+// format queues a format record. The previous session is already closed, so
+// anything still queued belongs to it. It never blocks: if the reader is
+// stuck, the old records go, since the new stream starts on a keyframe.
 func (w *writer) format(js []byte) {
 	rec := w.record(recFormat, 0, 0, js)
 	for {
@@ -106,10 +106,14 @@ func (w *writer) format(js []byte) {
 			return
 		default:
 		}
-		select {
-		case <-w.q:
-			w.dropped.Add(1)
-		default:
+	drain:
+		for {
+			select {
+			case <-w.q:
+				w.dropped.Add(1)
+			default:
+				break drain
+			}
 		}
 	}
 }

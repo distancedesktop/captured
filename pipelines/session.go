@@ -79,6 +79,9 @@ type Info struct {
 	Height  int    `json:"height"`
 	Encoder string `json:"encoder"`
 	HW      string `json:"hw"` // device frames go in on, "" for system memory
+	// LiveBitrate is false when the encoder can't change bitrate in place;
+	// callers restart the session for those.
+	LiveBitrate bool `json:"-"`
 }
 
 type Stats struct {
@@ -267,7 +270,7 @@ func openHW(g gpuGrabber, cfg av.Config, t av.HWType, device string, f av.PixFmt
 
 func (s *session) setInfo(e *encoder, w, h int) {
 	s.mu.Lock()
-	s.info = Info{Width: w, Height: h, Encoder: e.Name, HW: string(e.HW)}
+	s.info = Info{Width: w, Height: h, Encoder: e.Name, HW: string(e.HW), LiveBitrate: e.LiveBitrate()}
 	s.mu.Unlock()
 	log.Printf("encoding %dx%d@%d with %s (frames in %s)", w, h, s.cfg.FPS, e.Name, map[bool]string{true: string(e.HW), false: "system memory"}[e.HW != ""])
 }
@@ -303,14 +306,6 @@ func (s *session) run(ctx context.Context, g grabber, enc *encoder, paced bool) 
 			bitrate = b
 			if enc.LiveBitrate() {
 				enc.SetBitrate(b)
-			} else {
-				s.closeEncoder(g, enc)
-				ne, err := s.openEncoder(g)
-				if err != nil {
-					*enc = encoder{}
-					return err
-				}
-				*enc = *ne
 			}
 		}
 		if s.keyframe.Swap(false) {

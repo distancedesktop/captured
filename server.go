@@ -360,7 +360,8 @@ func (s *server) set(kv map[string]json.RawMessage, restart bool) ([]string, err
 			if p.live != nil {
 				p.live(s, v)
 			}
-			needRestart = needRestart || p.restart
+			needRestart = needRestart || p.restart ||
+				(k == "video.bitrate" && !s.sess.Info().LiveBitrate)
 		}
 	}
 	s.mu.Unlock()
