@@ -35,6 +35,11 @@ const (
 	glTextureMagFilter     = 0x2800
 	glNearest              = 0x2600
 	glPackAlignment        = 0x0D05
+	glReadFramebuffer      = 0x8CA8
+	glDrawFramebuffer      = 0x8CA9
+	glColorBufferBit       = 0x4000
+	glLinear               = 0x2601
+	glRGBA8                = 0x8058
 )
 
 // Per-plane dma-buf attributes: fd, offset, pitch, modifier lo, modifier hi.
@@ -78,6 +83,8 @@ var (
 	glPixelStorei                func(name uint32, v int32)
 	glReadPixels                 func(x, y, w, h int32, format, typ uint32, px unsafe.Pointer)
 	glGetError                   func() uint32
+	glBlitFramebuffer            func(sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1 int32, mask, filter uint32)
+	glTexStorage2D               func(target uint32, levels int32, format uint32, w, h int32)
 )
 
 func loadEGL() error {
@@ -137,6 +144,8 @@ func loadEGL() error {
 		purego.RegisterLibFunc(&glPixelStorei, gles, "glPixelStorei")
 		purego.RegisterLibFunc(&glReadPixels, gles, "glReadPixels")
 		purego.RegisterLibFunc(&glGetError, gles, "glGetError")
+		purego.RegisterLibFunc(&glBlitFramebuffer, gles, "glBlitFramebuffer")
+		purego.RegisterLibFunc(&glTexStorage2D, gles, "glTexStorage2D")
 	})
 	return eglErr
 }

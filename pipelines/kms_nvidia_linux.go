@@ -4,6 +4,7 @@ package pipelines
 
 import (
 	"context"
+	"distancedesktop/captured/av"
 	"fmt"
 	"os"
 	"syscall"
@@ -78,6 +79,12 @@ type kmsNvidiaGrabber struct {
 	gpu    *eglGPU
 	fbs    map[uint32]*gpuFB
 	format uint32
+
+	// zero copy: the scanout is blitted (and scaled) into dst, which CUDA
+	// copies into the encoder's frame.
+	dst    gpuFB
+	dw, dh int
+	cuTex  *cudaGLTexture
 }
 
 func openKMSNvidia(o kmsOutput) (grabber, error) {
@@ -217,7 +224,57 @@ func (g *kmsNvidiaGrabber) grab(dst []byte) error {
 	return nil
 }
 
+func (g *kmsNvidiaGrabber) hw() (av.HWType, string, av.PixFmt) { return av.CUDA, "", av.RGB0 }
+
+func (g *kmsNvidiaGrabber) bindHW(dev *av.HWDevice, w, h int) error {
+	g.unbindHW()
+	g.dw, g.dh = w, h
+	glGenTextures(1, &g.dst.tex)
+	glBindTexture(glTexture2D, g.dst.tex)
+	glTexStorage2D(glTexture2D, 1, glRGBA8, int32(w), int32(h))
+	glGenFramebuffers(1, &g.dst.fbo)
+	glBindFramebuffer(glFramebuffer, g.dst.fbo)
+	glFramebufferTexture2D(glFramebuffer, glColorAttachment0, glTexture2D, g.dst.tex, 0)
+	if st := glCheckFramebufferStatus(glFramebuffer); st != glFramebufferComplete {
+		g.unbindHW()
+		return fmt.Errorf("blit target incomplete (0x%x)", st)
+	}
+	t, err := registerGLTexture(dev.CUDAContext(), g.dst.tex)
+	if err != nil {
+		g.unbindHW()
+		return err
+	}
+	g.cuTex = t
+	return nil
+}
+
+func (g *kmsNvidiaGrabber) unbindHW() {
+	g.cuTex.close()
+	g.cuTex = nil
+	g.freeFB(&g.dst)
+	g.dst = gpuFB{}
+}
+
+func (g *kmsNvidiaGrabber) grabHW(f av.Frame) error {
+	src, err := scanoutFB(g.fd, g.crtc, g.fb)
+	if err != nil {
+		return err
+	}
+	filter := uint32(glNearest)
+	if g.dw != g.w || g.dh != g.h {
+		filter = glLinear
+	}
+	glBindFramebuffer(glReadFramebuffer, src.fbo)
+	glBindFramebuffer(glDrawFramebuffer, g.dst.fbo)
+	glBlitFramebuffer(0, 0, int32(g.w), int32(g.h), 0, 0, int32(g.dw), int32(g.dh), glColorBufferBit, filter)
+	if e := glGetError(); e != 0 {
+		return fmt.Errorf("glBlitFramebuffer failed: 0x%x", e)
+	}
+	return g.cuTex.copyTo(f.Data(0), f.Linesize(0), g.dw, g.dh)
+}
+
 func (g *kmsNvidiaGrabber) close() error {
+	g.unbindHW()
 	if g.gpu != nil {
 		for k, f := range g.fbs {
 			g.freeFB(f)
