@@ -138,7 +138,7 @@ func (s *server) call(method string, params json.RawMessage) (any, error) {
 				return nil, &rpcError{-32602, method + " takes an object of properties"}
 			}
 		}
-		changed, err := s.set(kv)
+		changed, err := s.set(kv, method == "set")
 		if err != nil {
 			return nil, err
 		}
@@ -318,7 +318,9 @@ func (s *server) get(keys []string) (map[string]any, error) {
 }
 
 // set validates everything before changing anything.
-func (s *server) set(kv map[string]json.RawMessage) ([]string, error) {
+// set applies kv. With restart, changing a restart property while streaming
+// restarts the stream.
+func (s *server) set(kv map[string]json.RawMessage, restart bool) ([]string, error) {
 	vals := map[string]any{}
 	for k, raw := range kv {
 		p, ok := props[k]
@@ -337,7 +339,7 @@ func (s *server) set(kv map[string]json.RawMessage) ([]string, error) {
 		vals[k] = v
 	}
 	s.mu.Lock()
-	restart := false
+	needRestart := false
 	var changed []string
 	for k, v := range vals {
 		p := props[k]
@@ -349,12 +351,12 @@ func (s *server) set(kv map[string]json.RawMessage) ([]string, error) {
 			if p.live != nil {
 				p.live(s, v)
 			}
-			restart = restart || p.restart
+			needRestart = needRestart || p.restart
 		}
 	}
 	s.mu.Unlock()
 	sort.Strings(changed)
-	if restart {
+	if restart && needRestart {
 		return changed, s.start()
 	}
 	return changed, nil
