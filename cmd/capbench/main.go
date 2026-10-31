@@ -35,14 +35,19 @@ var (
 )
 
 type rpc struct {
-	mu   sync.Mutex
-	in   io.Writer
-	id   int
-	wait map[int]chan json.RawMessage
+	mu     sync.Mutex
+	in     io.Writer
+	id     int
+	wait   map[int]chan json.RawMessage
+	closed bool
 }
 
 func (r *rpc) call(method string, params any) (json.RawMessage, error) {
 	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil, fmt.Errorf("%s: captured exited", method)
+	}
 	r.id++
 	id := r.id
 	ch := make(chan json.RawMessage, 1)
@@ -57,7 +62,11 @@ func (r *rpc) call(method string, params any) (json.RawMessage, error) {
 		Result json.RawMessage
 		Error  *struct{ Message string }
 	}
-	if err := json.Unmarshal(<-ch, &m); err != nil {
+	line, ok := <-ch
+	if !ok {
+		return nil, fmt.Errorf("%s: captured exited", method)
+	}
+	if err := json.Unmarshal(line, &m); err != nil {
 		return nil, err
 	}
 	if m.Error != nil {
@@ -89,6 +98,13 @@ func (r *rpc) read(rd io.Reader) {
 			ch <- line
 		}
 	}
+	r.mu.Lock()
+	for id, ch := range r.wait {
+		close(ch)
+		delete(r.wait, id)
+	}
+	r.closed = true
+	r.mu.Unlock()
 }
 
 func main() {

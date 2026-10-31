@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"distancedesktop/captured/av"
 	"distancedesktop/captured/pipelines"
@@ -50,11 +51,11 @@ type server struct {
 	outMu sync.Mutex
 	out   *json.Encoder
 
-	mu      sync.Mutex
-	props   map[string]any
-	pipe    pipelines.Pipeline
-	sess    pipelines.Session
-	session int
+	mu    sync.Mutex
+	props map[string]any
+	pipe  pipelines.Pipeline
+	sess  pipelines.Session
+	live  atomic.Pointer[pipelines.Session]
 }
 
 func newServer(ctx context.Context, out io.Writer, media *writer) *server {
@@ -64,12 +65,12 @@ func newServer(ctx context.Context, out io.Writer, media *writer) *server {
 			s.props[k] = p.def
 		}
 	}
+	// Runs on the capture thread, so it must not take s.mu: stop holds it
+	// while waiting for that thread to finish.
 	media.onDrop = func() {
-		s.mu.Lock()
-		if s.sess != nil {
-			s.sess.Keyframe()
+		if p := s.live.Load(); p != nil {
+			(*p).Keyframe()
 		}
-		s.mu.Unlock()
 	}
 	return s
 }
@@ -431,7 +432,7 @@ func (s *server) start() error {
 	s.media.format(js)
 	close(gate)
 	s.pipe, s.sess = p, sess
-	s.session++
+	s.live.Store(&sess)
 	go s.watch(sess)
 	return nil
 }
@@ -465,6 +466,7 @@ func (s *server) stopLocked() {
 	if s.sess != nil {
 		sess := s.sess
 		s.sess, s.pipe = nil, nil
+		s.live.Store(nil)
 		sess.Close()
 	}
 }
