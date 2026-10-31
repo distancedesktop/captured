@@ -3,7 +3,7 @@ on:
   push:
   pull_request:
 jobs:
-  build:
+  linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -11,5 +11,38 @@ jobs:
         with:
           go-version: "1.26"
           cache: true
+      - run: sudo apt-get update && sudo apt-get install -y pkg-config libavcodec-dev libavutil-dev libswscale-dev
       - run: go vet ./...
       - run: go build ./...
+      - run: go test ./...
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - run: brew install ffmpeg pkg-config
+      - run: go vet ./...
+      - run: go build ./...
+      - run: go test ./...
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          path-type: inherit
+          install: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-ffmpeg
+      - run: go vet ./...
+      - run: go build ./...
+      - run: go test ./...
