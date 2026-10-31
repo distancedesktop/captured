@@ -257,8 +257,17 @@ var props = map[string]property{
 	"video.bitrate": {def: int64(10_000_000), parse: num(100_000, 1_000_000_000),
 		live: func(s *server, v any) { s.sess.SetBitrate(v.(int64)) }},
 	// Write-only trigger: set it to true to get an IDR on the next frame.
-	"video.keyframe": {parse: func(json.RawMessage) (any, error) { return nil, nil },
-		live: func(s *server, _ any) { s.sess.Keyframe() }},
+	"video.keyframe": {parse: func(raw json.RawMessage) (any, error) {
+		var b bool
+		if err := json.Unmarshal(raw, &b); err != nil {
+			return nil, errors.New("want true")
+		}
+		return b, nil
+	}, live: func(s *server, v any) {
+		if v.(bool) {
+			s.sess.Keyframe()
+		}
+	}},
 
 	"video.active_pipeline": {readonly: true, read: func(s *server) any {
 		if s.pipe == nil {
