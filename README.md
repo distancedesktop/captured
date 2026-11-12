@@ -55,6 +55,7 @@ Settable properties:
 | `display` | `0` | display id from `list` |
 | `video.codec` | `h264` | `h264`, `hevc`, `av1` |
 | `video.encoder` | `auto` | a libav encoder name (`h264_nvenc`, `hevc_vaapi`, `libx264`, ...). `auto` tries hardware first |
+| `video.hw_device` | `""` | hardware device for encoders that take one. For VAAPI this is a DRM render node (`/dev/dri/renderD128`); empty tries each `/dev/dri/renderD*` and then libav's default |
 | `video.fps` | `60` | |
 | `video.width`, `video.height` | `0` | output size, 0 keeps the capture size |
 | `video.bitrate` | `10000000` | bits per second. Live on NVENC and x264, the encoder reopens on the others |
