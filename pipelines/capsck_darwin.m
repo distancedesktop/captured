@@ -3,8 +3,9 @@
 #import <CoreVideo/CoreVideo.h>
 #include "capsck_darwin.h"
 
-// CapSCKStream keeps only the newest frame: realtime consumers want
-// latency, not backlog. SCStream's own queueDepth drops for it too.
+// CapSCKStream keeps the newest frame and redelivers it on SCStream idle
+// samples, so a static screen still produces frames at the configured rate.
+// SCStream's own queueDepth drops stale frames too.
 // Assign properties: every object is allocated once and released once in
 // cap_sck_stop, so the setters must not add ownership.
 @interface CapSCKStream : NSObject <SCStreamOutput, SCStreamDelegate>
@@ -12,6 +13,7 @@
 @property(nonatomic, assign) dispatch_queue_t queue;
 @property(nonatomic, assign) NSCondition *cond;
 @property(nonatomic) CVPixelBufferRef latest;
+@property(nonatomic) BOOL pending;
 @property(nonatomic, assign) NSError *err;
 @property(nonatomic) BOOL stopped;
 @end
@@ -23,15 +25,35 @@
                    ofType:(SCStreamOutputType)type {
     if (type != SCStreamOutputTypeScreen || !CMSampleBufferIsValid(sampleBuffer))
         return;
-    CVPixelBufferRef pb = CMSampleBufferGetImageBuffer(sampleBuffer);
-    if (!pb)
-        return;
-    CVBufferRetain(pb);
+
+    // Complete/Started samples carry new pixels; Idle/Blank/Suspended/Stopped
+    // are cadence markers. Refresh the stored frame only for real content,
+    // but let every sample wake one waiter so static screens keep the rate.
+    BOOL isContent = YES;
+    CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, false);
+    if (attachments && CFArrayGetCount(attachments) > 0) {
+        CFDictionaryRef attach = (CFDictionaryRef)CFArrayGetValueAtIndex(attachments, 0);
+        CFTypeRef statusRaw = CFDictionaryGetValue(attach,
+            (__bridge CFStringRef)SCStreamFrameInfoStatus);
+        if (statusRaw) {
+            int statusVal = ((__bridge NSNumber *)statusRaw).intValue;
+            if (statusVal != SCFrameStatusComplete && statusVal != SCFrameStatusStarted)
+                isContent = NO;
+        }
+    }
+    CVPixelBufferRef pb = isContent ? CMSampleBufferGetImageBuffer(sampleBuffer) : NULL;
+
     [_cond lock];
-    if (_latest)
-        CVBufferRelease(_latest);
-    _latest = pb;
-    [_cond signal];
+    if (pb) {
+        CVBufferRetain(pb);
+        if (_latest)
+            CVBufferRelease(_latest);
+        _latest = pb;
+    }
+    if (_latest && !_pending) {
+        _pending = YES;
+        [_cond signal];
+    }
     [_cond unlock];
 }
 
@@ -144,7 +166,7 @@ int cap_sck_next(void *h, int timeout_ms, void **out, char *errbuf, int errlen) 
     CapSCKStream *s = (CapSCKStream *)h;
     *out = NULL;
     [s.cond lock];
-    while (!s.latest && !s.stopped && !s.err) {
+    while (!_pending && !s.stopped && !s.err) {
         // Runs on the Go capture thread: no autorelease pool exists here, so
         // each idle wait iteration's deadline needs its own.
         @autoreleasepool {
@@ -155,7 +177,7 @@ int cap_sck_next(void *h, int timeout_ms, void **out, char *errbuf, int errlen) 
             }
         }
     }
-    if (!s.latest) {
+    if (!_pending) {
         NSError *e = s.err;
         if (!e && s.stopped)
             e = [NSError errorWithDomain:@"captured" code:1
@@ -164,9 +186,11 @@ int cap_sck_next(void *h, int timeout_ms, void **out, char *errbuf, int errlen) 
         [s.cond unlock];
         return -1;
     }
-    *out = s.latest;
-    s.latest = NULL;
+    CVPixelBufferRef pb = s.latest;
+    CVBufferRetain(pb);
+    s.pending = NO;
     [s.cond unlock];
+    *out = pb;
     return 0;
 }
 
@@ -205,6 +229,7 @@ void cap_sck_stop(void *h) {
     dispatch_release(sem);
     [s.cond lock];
     s.stopped = YES;
+    s.pending = NO;
     [s.cond broadcast];
     [s.cond unlock];
     [s.cond release];
