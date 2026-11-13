@@ -244,16 +244,17 @@ var props = map[string]property{
 		}
 		return "idle"
 	}},
-	"pipeline":      {def: "auto", restart: true, parse: str()},
-	"display":       {def: int64(0), restart: true, parse: num(0, 1<<32-1)},
-	"video.codec":   {def: "h264", restart: true, parse: str(codecs...)},
-	"video.encoder": {def: "auto", restart: true, parse: str()},
-	"video.fps":     {def: int64(60), restart: true, parse: num(1, 1000)},
-	"video.width":   {def: int64(0), restart: true, parse: num(0, 16384)},
-	"video.height":  {def: int64(0), restart: true, parse: num(0, 16384)},
-	"video.gop":     {def: int64(0), restart: true, parse: num(0, 1<<30)},
-	"video.preset":  {def: "", restart: true, parse: str()},
-	"video.options": {def: map[string]string{}, restart: true, parse: strMap},
+	"pipeline":        {def: "auto", restart: true, parse: str()},
+	"display":         {def: int64(0), restart: true, parse: num(0, 1<<32-1)},
+	"video.codec":     {def: "h264", restart: true, parse: str(codecs...)},
+	"video.encoder":   {def: "auto", restart: true, parse: str()},
+	"video.hw_device": {def: "", restart: true, parse: str()},
+	"video.fps":       {def: int64(60), restart: true, parse: num(1, 1000)},
+	"video.width":     {def: int64(0), restart: true, parse: num(0, 16384)},
+	"video.height":    {def: int64(0), restart: true, parse: num(0, 16384)},
+	"video.gop":       {def: int64(0), restart: true, parse: num(0, 1<<30)},
+	"video.preset":    {def: "", restart: true, parse: str()},
+	"video.options":   {def: map[string]string{}, restart: true, parse: strMap},
 	"video.bitrate": {def: int64(10_000_000), parse: num(100_000, 1_000_000_000),
 		live: func(s *server, v any) { s.sess.SetBitrate(v.(int64)) }},
 	// Write-only trigger: set it to true to get an IDR on the next frame.
@@ -414,15 +415,16 @@ func (s *server) start() error {
 		display = ds[0].ID
 	}
 	cfg := pipelines.Config{
-		FPS:     int(s.props["video.fps"].(int64)),
-		Width:   int(s.props["video.width"].(int64)),
-		Height:  int(s.props["video.height"].(int64)),
-		Codec:   s.props["video.codec"].(string),
-		Encoder: s.props["video.encoder"].(string),
-		Bitrate: s.props["video.bitrate"].(int64),
-		GOP:     int(s.props["video.gop"].(int64)),
-		Preset:  s.props["video.preset"].(string),
-		Options: s.props["video.options"].(map[string]string),
+		FPS:      int(s.props["video.fps"].(int64)),
+		Width:    int(s.props["video.width"].(int64)),
+		Height:   int(s.props["video.height"].(int64)),
+		Codec:    s.props["video.codec"].(string),
+		Encoder:  s.props["video.encoder"].(string),
+		HWDevice: s.props["video.hw_device"].(string),
+		Bitrate:  s.props["video.bitrate"].(int64),
+		GOP:      int(s.props["video.gop"].(int64)),
+		Preset:   s.props["video.preset"].(string),
+		Options:  s.props["video.options"].(map[string]string),
 	}
 	// The format record has to go out before the first packet, but the
 	// encoder (and so the format) is only known once Start returns, so packets
