@@ -95,7 +95,15 @@ func (dxgi) Start(ctx context.Context, displayID uint32, cfg Config) (Session, e
 	// Zero copy is off by default: it can't be validated on every GPU/driver
 	// combo, so it's opt-in via video.options until proven out.
 	zerocopy := cfg.Options["dxgi.zerocopy"] == "1" || cfg.Options["dxgi.zerocopy"] == "true"
-	delete(cfg.Options, "dxgi.zerocopy") // pipeline flag, not an encoder option
+	// dxgi.zerocopy is a pipeline flag, not an encoder option; drop it from a
+	// copy rather than the shared video.options map, so a restart keeps it.
+	opts := make(map[string]string, len(cfg.Options))
+	for k, v := range cfg.Options {
+		if k != "dxgi.zerocopy" {
+			opts[k] = v
+		}
+	}
+	cfg.Options = opts
 	return startSession(ctx, func() (grabber, error) { return openDXGI(o, cfg.FPS, zerocopy) }, cfg, false)
 }
 
@@ -741,12 +749,16 @@ func (g *dxgiGrabber) bindHW(dev *av.HWDevice, w, h int) error {
 	if fctx == nil {
 		return errors.New("ID3D11Device::GetImmediateContext failed")
 	}
+	// DXGI rejects a second duplication of one output within a process, so the
+	// current dup has to go before the new one is created. If that fails the
+	// staging path re-duplicates on its own device at the next grab.
+	g.dup.release()
+	g.dup = nil
 	var dup *com
 	if err := hrErr(g.out1.call(vOutput1DuplicateOut, uintptr(fdev), ptr(&dup))); err != nil {
 		fctx.release()
 		return fmt.Errorf("DuplicateOutput on the encoder's device: %w", err)
 	}
-	g.dup.release()
 	g.dup = dup
 	g.fdev = (*com)(fdev) // not ours: the HWDevice owns the device
 	g.fctx = fctx         // ours to release (GetImmediateContext adds a ref)

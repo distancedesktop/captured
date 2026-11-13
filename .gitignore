@@ -8,4 +8,5 @@ env/
 build/
 
 # macOS 
-.DS_STOREcaptured.exe
+.DS_STORE
+captured.exe
