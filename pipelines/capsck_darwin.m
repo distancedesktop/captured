@@ -200,7 +200,8 @@ int cap_sck_pb_copy(void *pb_, void *dst, int w, int h) {
         return -1;
     if ((int)CVPixelBufferGetWidth(pb) != w || (int)CVPixelBufferGetHeight(pb) != h)
         return -2;
-    CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+    if (CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess)
+        return -3;
     uint8_t *src = (uint8_t *)CVPixelBufferGetBaseAddress(pb);
     size_t stride = CVPixelBufferGetBytesPerRow(pb);
     uint8_t *d = (uint8_t *)dst;
