@@ -29,3 +29,30 @@ func TestDeviceLabel(t *testing.T) {
 		t.Fatal("bad device label")
 	}
 }
+
+func TestWithEncoderDeviceNVENC(t *testing.T) {
+	base := map[string]string{"preset": "p1"}
+	got := withEncoderDevice(base, "h264_nvenc", "1")
+	if got["gpu"] != "1" || got["preset"] != "p1" {
+		t.Fatalf("got %v", got)
+	}
+	if _, ok := base["gpu"]; ok {
+		t.Fatal("base options mutated")
+	}
+}
+
+func TestWithEncoderDeviceExistingOptionWins(t *testing.T) {
+	got := withEncoderDevice(map[string]string{"gpu": "0"}, "hevc_nvenc", "1")
+	if got["gpu"] != "0" {
+		t.Fatalf("got %v", got)
+	}
+}
+
+func TestWithEncoderDeviceOtherFamilies(t *testing.T) {
+	for _, name := range []string{"h264_vaapi", "libx264", "h264_qsv"} {
+		got := withEncoderDevice(nil, name, "1")
+		if len(got) != 0 {
+			t.Fatalf("%s got %v", name, got)
+		}
+	}
+}

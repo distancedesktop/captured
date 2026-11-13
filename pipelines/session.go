@@ -250,6 +250,7 @@ func (s *session) openEncoder(g grabber) (*encoder, error) {
 				}
 				up, cfg.UploadDev = d, d
 			}
+			cfg.Options = withEncoderDevice(base.Options, name, s.cfg.HWDevice)
 			enc, err := av.Open(cfg)
 			if err != nil {
 				up.Close()
@@ -289,6 +290,30 @@ func deviceLabel(device string) string {
 		return "default"
 	}
 	return device
+}
+
+// withEncoderDevice maps video.hw_device onto the libav option encoders use
+// when they need a device but take system memory frames.
+func withEncoderDevice(opts map[string]string, encoder, device string) map[string]string {
+	if device == "" {
+		return opts
+	}
+	var key string
+	switch av.Family(encoder) {
+	case "nvenc":
+		key = "gpu"
+	default:
+		return opts
+	}
+	if _, ok := opts[key]; ok {
+		return opts
+	}
+	out := make(map[string]string, len(opts)+1)
+	for k, v := range opts {
+		out[k] = v
+	}
+	out[key] = device
+	return out
 }
 
 func openHW(g gpuGrabber, cfg av.Config, t av.HWType, device string, f av.PixFmt) (*encoder, error) {
