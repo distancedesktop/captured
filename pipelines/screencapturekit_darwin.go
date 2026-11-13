@@ -2,6 +2,13 @@
 
 package pipelines
 
+/*
+#cgo darwin LDFLAGS: -framework ScreenCaptureKit -framework CoreMedia -framework CoreVideo -framework Foundation
+#include "capsck_darwin.h"
+#include <stdlib.h>
+*/
+import "C"
+
 import (
 	"context"
 	"errors"
@@ -10,13 +17,19 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
+
+	"distancedesktop/captured/av"
 
 	sckit "github.com/LocalKinAI/sckit-go"
 	"github.com/ebitengine/purego"
 )
 
-// screencapturekit: macOS ScreenCaptureKit through sckit-go. Frames arrive as
-// the system produces them.
+// screencapturekit: macOS ScreenCaptureKit. Displays come from sckit-go;
+// the stream itself is capsck_darwin.m and returns CVPixelBuffers, which go
+// to VideoToolbox encoders without leaving the GPU (blit into the pooled
+// surface when the output size differs). Frames arrive as the system
+// produces them.
 //
 // Display ids are indexes like on Linux, main display first, so display 0
 // always works. Sizes are in pixels: ScreenCaptureKit reports points, which
@@ -92,20 +105,21 @@ func (screenCaptureKit) Start(ctx context.Context, displayID uint32, cfg Config)
 	}
 	d := ds[i]
 	return startSession(ctx, func() (grabber, error) {
-		st, err := sckit.NewStream(ctx, d.sck, sckit.WithFrameRate(fps), sckit.WithResolution(d.Width, d.Height))
-		if err != nil {
-			return nil, err
+		errbuf := make([]byte, 256)
+		h := C.cap_sck_start(C.uint32_t(d.sck.ID), C.int(d.Width), C.int(d.Height), C.int(fps),
+			(*C.char)(unsafe.Pointer(&errbuf[0])), C.int(len(errbuf)))
+		if h == nil {
+			return nil, errors.New(C.GoString((*C.char)(unsafe.Pointer(&errbuf[0]))))
 		}
-		return &sckGrabber{st: st, ctx: ctx, w: st.Width(), h: st.Height()}, nil
+		return &sckGrabber{st: h, ctx: ctx, w: d.Width, h: d.Height}, nil
 	}, cfg, false)
 }
 
-// sckit.Stream isn't safe to Close while another thread is inside
-// NextFrame: the handle is freed under it and the frame wait never wakes. So
-// grab waits in short slices and checks a flag, and only close (on the stream
-// thread, after grab has returned) tears the stream down.
+// The stream hands out retained CVPixelBufferRefs. Frames stay on the GPU
+// when the encoder is VideoToolbox; the CPU path locks and copies the same
+// buffer.
 type sckGrabber struct {
-	st      *sckit.Stream
+	st      unsafe.Pointer
 	ctx     context.Context
 	w, h    int
 	stopped atomic.Bool
@@ -117,34 +131,72 @@ var errSCKStopped = errors.New("screencapturekit: stream stopped")
 
 func (g *sckGrabber) size() (int, int) { return g.w, g.h }
 
-func (g *sckGrabber) grab(dst []byte) error {
+// next returns the newest frame's pixel buffer, owned by the caller.
+func (g *sckGrabber) next() (unsafe.Pointer, error) {
+	errbuf := make([]byte, 256)
 	for {
 		if g.stopped.Load() {
-			return errSCKStopped
+			return nil, errSCKStopped
 		}
 		if err := g.ctx.Err(); err != nil {
-			return err
+			return nil, err
 		}
-		ctx, cancel := context.WithTimeout(g.ctx, sckWaitSlice)
-		f, err := g.st.NextFrameBGRA(ctx)
-		cancel()
-		if errors.Is(err, sckit.ErrTimeout) || errors.Is(err, context.DeadlineExceeded) {
+		var pb unsafe.Pointer
+		ret := C.cap_sck_next(g.st, C.int(sckWaitSlice.Milliseconds()), &pb,
+			(*C.char)(unsafe.Pointer(&errbuf[0])), C.int(len(errbuf)))
+		if ret == 1 {
 			continue
 		}
-		if err != nil {
-			return err
+		if ret != 0 {
+			return nil, errors.New(C.GoString((*C.char)(unsafe.Pointer(&errbuf[0]))))
 		}
-		if f.Width != g.w || f.Height != g.h {
-			return fmt.Errorf("frame is %dx%d, stream is %dx%d", f.Width, f.Height, g.w, g.h)
+		var w, h C.int
+		C.cap_sck_pb_size(pb, &w, &h)
+		if int(w) != g.w || int(h) != g.h {
+			C.cap_sck_pb_release(pb)
+			return nil, fmt.Errorf("frame is %dx%d, stream is %dx%d", int(w), int(h), g.w, g.h)
 		}
-		copy(dst, f.Pixels)
-		return nil
+		return pb, nil
 	}
+}
+
+func (g *sckGrabber) grab(dst []byte) error {
+	pb, err := g.next()
+	if err != nil {
+		return err
+	}
+	defer C.cap_sck_pb_release(pb)
+	if C.cap_sck_pb_copy(pb, unsafe.Pointer(&dst[0]), C.int(g.w), C.int(g.h)) != 0 {
+		return errors.New("unexpected pixel buffer layout")
+	}
+	return nil
+}
+
+func (g *sckGrabber) hw() (av.HWType, string, av.PixFmt) { return av.VideoToolbox, "", av.BGRA }
+
+func (g *sckGrabber) bindHW(dev *av.HWDevice, w, h int) error { return nil }
+
+func (g *sckGrabber) unbindHW() {}
+
+func (g *sckGrabber) grabHW(f av.Frame) error {
+	pb, err := g.next()
+	if err != nil {
+		return err
+	}
+	var w, h C.int
+	C.cap_sck_pb_size(pb, &w, &h)
+	if err := f.FillVideoToolbox(pb, int(w), int(h)); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (g *sckGrabber) interrupt() { g.stopped.Store(true) }
 
-func (g *sckGrabber) close() error { return g.st.Close() }
+func (g *sckGrabber) close() error {
+	C.cap_sck_stop(g.st)
+	return nil
+}
 
 // CoreGraphics, for the display mode's pixel size and refresh rate.
 var cg struct {
