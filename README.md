@@ -57,13 +57,13 @@ Settable properties:
 | `video.encoder` | `auto` | a libav encoder name (`h264_nvenc`, `hevc_vaapi`, `libx264`, ...). `auto` tries hardware first |
 | `video.fps` | `60` | |
 | `video.width`, `video.height` | `0` | output size, 0 keeps the capture size |
-| `video.bitrate` | `10000000` | bits per second. Live on NVENC and x264, the encoder reopens on the others |
+| `video.bitrate` | `10000000` | bits per second. Live on NVENC and x264; on other encoders a change restarts the stream |
 | `video.gop` | `0` | frames between keyframes, 0 means only on request |
 | `video.preset` | `""` | encoder preset, empty picks a low latency one |
 | `video.options` | `{}` | extra libav encoder options |
 | `video.keyframe` | | set to `true` to force a keyframe on the next frame |
 
-Changing anything except bitrate and keyframe while streaming restarts the stream. `audio.*` keys are reserved and return an error for now.
+Setting anything except bitrate (on NVENC and x264) and keyframe while streaming restarts the stream, with a new format record, even when the value is unchanged. `audio.*` keys are reserved and return an error for now.
 
 Read-only: `version`, `state`, `video.active_pipeline`, `video.active_encoder`, `video.hw` (the hardware frame type, empty for system memory), `video.size`, and `stats.fps`, `stats.frames`, `stats.bitrate`, `stats.capture_avg_ms`, `stats.encode_avg_ms`, `stats.encode_max_ms`, `stats.dropped`, `stats.error`.
 
