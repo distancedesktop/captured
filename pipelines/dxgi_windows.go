@@ -26,12 +26,13 @@ import (
 // fps so the stream never goes quiet.
 //
 // Two paths to the encoder:
-// - zero copy: when the encoder takes D3D11 frames at the capture size, frames
-//   are copied GPU to GPU straight into the encoder's texture. The duplication
-//   is re-created on the encoder's device (D3D11 objects can't cross devices).
-// - system memory: each frame is copied into a staging texture, mapped, and
-//   packed into BGRA. Scaled or rotated outputs take this path: there's no
-//   GPU-side scaler/rotator here.
+// - zero copy (opt-in, video.options dxgi.zerocopy=1): when the encoder takes
+//   D3D11 frames at the capture size, frames are copied GPU to GPU straight
+//   into the encoder's texture. The duplication is re-created on the encoder's
+//   device (D3D11 objects can't cross devices).
+// - system memory (default): each frame is copied into a staging texture,
+//   mapped, and packed into BGRA. Scaled or rotated outputs take this path:
+//   there's no GPU-side scaler/rotator here.
 //
 // Runs in the interactive user's session. The secure desktop (UAC, lock
 // screen) can only be duplicated by SYSTEM; for everyone else the stream keeps
@@ -57,7 +58,7 @@ func (dxgi) Probe(ctx context.Context) error {
 	var first error
 	for _, o := range outs {
 		err := onOwnThread(func() error {
-			g, err := openDXGI(o, 60)
+			g, err := openDXGI(o, 60, false)
 			if err != nil {
 				return err
 			}
@@ -91,7 +92,11 @@ func (dxgi) Start(ctx context.Context, displayID uint32, cfg Config) (Session, e
 		return nil, err
 	}
 	o := outs[i]
-	return startSession(ctx, func() (grabber, error) { return openDXGI(o, cfg.FPS) }, cfg, false)
+	// Zero copy is off by default: it can't be validated on every GPU/driver
+	// combo, so it's opt-in via video.options until proven out.
+	zerocopy := cfg.Options["dxgi.zerocopy"] == "1" || cfg.Options["dxgi.zerocopy"] == "true"
+	delete(cfg.Options, "dxgi.zerocopy") // pipeline flag, not an encoder option
+	return startSession(ctx, func() (grabber, error) { return openDXGI(o, cfg.FPS, zerocopy) }, cfg, false)
 }
 
 // COM plumbing. A COM object is a pointer to a vtable pointer.
@@ -522,11 +527,12 @@ type dxgiGrabber struct {
 	// zero copy: duplication runs on the encoder's D3D11 device; fdev/fctx are
 	// its device and immediate context (owned by the av.HWDevice, not us).
 	// hwLast is the default-usage texture take() copies into and deliverHW
-	// copies out of.
-	hwMode bool
-	fdev   *com
-	fctx   *com
-	hwLast *com
+	// copies out of. zerocopy opts the pipeline into this path at all.
+	zerocopy bool
+	hwMode   bool
+	fdev     *com
+	fctx     *com
+	hwLast   *com
 
 	w, h   int // as the user sees it
 	tw, th int // as the texture is laid out (unrotated scanout)
@@ -540,13 +546,13 @@ type dxgiGrabber struct {
 	stop     atomic.Bool
 }
 
-func openDXGI(o dxgiOutput, fps int) (*dxgiGrabber, error) {
+func openDXGI(o dxgiOutput, fps int, zerocopy bool) (*dxgiGrabber, error) {
 	fps = clampFPS(fps)
 	dpiAware()
 	if err := procD3D11CreateDevice.Find(); err != nil {
 		return nil, fmt.Errorf("d3d11.dll: %w", err)
 	}
-	g := &dxgiGrabber{device: o.device, adapter: o.adapter, interval: time.Second / time.Duration(fps)}
+	g := &dxgiGrabber{device: o.device, adapter: o.adapter, zerocopy: zerocopy, interval: time.Second / time.Duration(fps)}
 	// AcquireNextFrame's timeout rounds to the system tick (15.6 ms by
 	// default), which caps an idle 60 fps stream near 40 fps.
 	if procTimeBeginPeriod.Find() == nil {
@@ -706,8 +712,13 @@ func (g *dxgiGrabber) grab(dst []byte) error {
 	return g.deliver(dst)
 }
 
-// hw: zero copy goes to D3D11 encoders on the output's adapter.
+// hw: zero copy goes to D3D11 encoders on the output's adapter. Without the
+// opt-in the grabber reports no hw device, so encoders always take the
+// staging path.
 func (g *dxgiGrabber) hw() (av.HWType, string, av.PixFmt) {
+	if !g.zerocopy {
+		return av.CPU, "", 0
+	}
 	return av.D3D11, strconv.Itoa(g.adapter), av.BGRA
 }
 
