@@ -5,12 +5,14 @@
 
 // CapSCKStream keeps only the newest frame: realtime consumers want
 // latency, not backlog. SCStream's own queueDepth drops for it too.
+// Assign properties: every object is allocated once and released once in
+// cap_sck_stop, so the setters must not add ownership.
 @interface CapSCKStream : NSObject <SCStreamOutput, SCStreamDelegate>
-@property(nonatomic, retain) SCStream *stream;
-@property(nonatomic) dispatch_queue_t queue;
-@property(nonatomic, retain) NSCondition *cond;
+@property(nonatomic, assign) SCStream *stream;
+@property(nonatomic, assign) dispatch_queue_t queue;
+@property(nonatomic, assign) NSCondition *cond;
 @property(nonatomic) CVPixelBufferRef latest;
-@property(nonatomic, retain) NSError *err;
+@property(nonatomic, assign) NSError *err;
 @property(nonatomic) BOOL stopped;
 @end
 
@@ -69,6 +71,7 @@ void *cap_sck_start(uint32_t displayID, int w, int h, int fps, char *errbuf, int
         if (serr || !content) {
             cap_sck_err(errbuf, errlen, @"shareable content: %@", serr ? serr : @"empty");
             [serr release];
+            dispatch_release(sem);
             return NULL;
         }
         SCDisplay *display = nil;
@@ -78,6 +81,7 @@ void *cap_sck_start(uint32_t displayID, int w, int h, int fps, char *errbuf, int
         if (!display) {
             cap_sck_err(errbuf, errlen, @"display %u not found", displayID);
             [content release];
+            dispatch_release(sem);
             return NULL;
         }
 
@@ -91,6 +95,7 @@ void *cap_sck_start(uint32_t displayID, int w, int h, int fps, char *errbuf, int
         SCContentFilter *filter =
             [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
 
+        __block NSError *sstartErr = nil;
         CapSCKStream *s = [[CapSCKStream alloc] init];
         s.cond = [[NSCondition alloc] init];
         s.queue = dispatch_queue_create("captured.sck", DISPATCH_QUEUE_SERIAL);
@@ -102,8 +107,8 @@ void *cap_sck_start(uint32_t displayID, int w, int h, int fps, char *errbuf, int
         [content release];
         if (!s.stream) {
             cap_sck_err(errbuf, errlen, @"SCStream init failed");
-            [s release];
-            return NULL;
+            dispatch_release(sem);
+            goto fail;
         }
         NSError *aerr = nil;
         if (![s.stream addStreamOutput:s
@@ -111,22 +116,27 @@ void *cap_sck_start(uint32_t displayID, int w, int h, int fps, char *errbuf, int
                     sampleHandlerQueue:s.queue
                                  error:&aerr]) {
             cap_sck_err(errbuf, errlen, @"addStreamOutput: %@", aerr);
-            [s release];
-            return NULL;
+            dispatch_release(sem);
+            goto fail;
         }
-        __block NSError *sstartErr = nil;
         [s.stream startCaptureWithCompletionHandler:^(NSError *e) {
             sstartErr = [e retain];
             dispatch_semaphore_signal(sem);
         }];
         dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+        dispatch_release(sem);
         if (sstartErr) {
             cap_sck_err(errbuf, errlen, @"startCapture: %@", sstartErr);
             [sstartErr release];
-            [s release];
-            return NULL;
+            goto fail;
         }
         return (void *)s;
+    fail:
+        [s.stream release];
+        dispatch_release(s.queue);
+        [s.cond release];
+        [s release];
+        return NULL;
     }
 }
 
@@ -135,10 +145,14 @@ int cap_sck_next(void *h, int timeout_ms, void **out, char *errbuf, int errlen) 
     *out = NULL;
     [s.cond lock];
     while (!s.latest && !s.stopped && !s.err) {
-        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout_ms / 1000.0];
-        if (![s.cond waitUntilDate:deadline]) {
-            [s.cond unlock];
-            return 1;
+        // Runs on the Go capture thread: no autorelease pool exists here, so
+        // each idle wait iteration's deadline needs its own.
+        @autoreleasepool {
+            NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout_ms / 1000.0];
+            if (![s.cond waitUntilDate:deadline]) {
+                [s.cond unlock];
+                return 1;
+            }
         }
     }
     if (!s.latest) {
@@ -188,12 +202,14 @@ void cap_sck_stop(void *h) {
         dispatch_semaphore_signal(sem);
     }];
     dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+    dispatch_release(sem);
     [s.cond lock];
     s.stopped = YES;
     [s.cond broadcast];
     [s.cond unlock];
     [s.cond release];
     [s.stream release];
+    dispatch_release(s.queue);
     if (s.latest)
         CVBufferRelease(s.latest);
     [s.err release];
