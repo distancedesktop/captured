@@ -166,7 +166,7 @@ int cap_sck_next(void *h, int timeout_ms, void **out, char *errbuf, int errlen) 
     CapSCKStream *s = (CapSCKStream *)h;
     *out = NULL;
     [s.cond lock];
-    while (!_pending && !s.stopped && !s.err) {
+    while (!s.pending && !s.stopped && !s.err) {
         // Runs on the Go capture thread: no autorelease pool exists here, so
         // each idle wait iteration's deadline needs its own.
         @autoreleasepool {
@@ -177,7 +177,7 @@ int cap_sck_next(void *h, int timeout_ms, void **out, char *errbuf, int errlen) 
             }
         }
     }
-    if (!_pending) {
+    if (!s.pending) {
         NSError *e = s.err;
         if (!e && s.stopped)
             e = [NSError errorWithDomain:@"captured" code:1
