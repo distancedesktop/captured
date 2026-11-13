@@ -32,6 +32,7 @@ type PixFmt int32
 var (
 	RGB0 = PixFmt(C.AV_PIX_FMT_RGB0)
 	BGR0 = PixFmt(C.AV_PIX_FMT_BGR0)
+	BGRA = PixFmt(C.AV_PIX_FMT_BGRA)
 	NV12 = PixFmt(C.AV_PIX_FMT_NV12)
 )
 
@@ -222,9 +223,6 @@ func lowLatency(cfg Config) map[string]string {
 		}
 	case "videotoolbox":
 		o["realtime"], o["prio_speed"] = "1", "1"
-		if Family(cfg.Encoder) == "videotoolbox" && cfg.Encoder != "prores_videotoolbox" {
-			o["constant_bit_rate"] = "1"
-		}
 	}
 	for k, v := range cfg.Options {
 		o[k] = v

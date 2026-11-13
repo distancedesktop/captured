@@ -11,7 +11,7 @@ Captures a display and encodes it in the same process. The Distance agent spawns
 | `kms_nvidia` | `kms_nvidia_linux.go` | Imports the NVIDIA scanout dma-buf into EGL, blits (and scales) it into a texture, copies that into a CUDA frame over CUDA-GL interop and hands it to NVENC. Nothing touches system memory. Falls back to `glReadPixels` for software encoders. Needs `CAP_SYS_ADMIN`. No cursor (it's on its own plane). |
 | `pipewire_mutter` | `pipewire_mutter_linux.go` | GNOME Mutter ScreenCast → PipeWire → `gst-launch-1.0`. Cursor included. Frames only arrive when the screen changes. Run as the desktop user. |
 | `kms_linear` | `kms_linear_linux.go` | Maps a linear scanout buffer and copies it (virtio-gpu, simpledrm, some iGPUs). Refuses tiled buffers. |
-| `screencapturekit` | `screencapturekit_darwin.go` | macOS ScreenCaptureKit via sckit-go. |
+| `screencapturekit` | `screencapturekit_darwin.go`, `capsck_darwin.m` | macOS ScreenCaptureKit. Frames arrive as CVPixelBuffers and go to VideoToolbox encoders without leaving the GPU (wrapped in place at native size, `VTPixelTransferSession` blit when scaling). CPU encoders lock and copy the same buffer. |
 | `dxgi` | `dxgi_windows.go` | Windows DXGI Desktop Duplication, staging texture copy. No cursor. Repeats the last frame when the screen is idle and recreates the duplication on access loss (UAC, mode change, fullscreen). |
 
 Shared bits: `pipeline.go` (interface and registry), `session.go` (the capture and encode loop, encoder choice, stats), `drm_linux.go`, `egl_linux.go`, `cuda_linux.go`. Capture libraries are loaded at runtime with purego (golang.org/x/sys/windows on Windows). libav is linked with cgo.
@@ -55,6 +55,7 @@ Settable properties:
 | `display` | `0` | display id from `list` |
 | `video.codec` | `h264` | `h264`, `hevc`, `av1` |
 | `video.encoder` | `auto` | a libav encoder name (`h264_nvenc`, `hevc_vaapi`, `libx264`, ...). `auto` tries hardware first |
+| `video.hw_device` | `""` | hardware device for encoders that take one. For VAAPI this is a DRM render node (`/dev/dri/renderD128`); empty tries each `/dev/dri/renderD*` and then libav's default. For NVENC this is the CUDA GPU index |
 | `video.fps` | `60` | |
 | `video.width`, `video.height` | `0` | output size, 0 keeps the capture size |
 | `video.bitrate` | `10000000` | bits per second. Live on NVENC and x264, the encoder reopens on the others |

@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"runtime"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -59,15 +62,16 @@ func clampFPS(fps int) int {
 
 // Config is everything a session needs to start.
 type Config struct {
-	FPS     int
-	Width   int // 0: native
-	Height  int
-	Codec   string // h264, hevc, av1
-	Encoder string // "" or "auto": best available for Codec
-	Bitrate int64
-	GOP     int // frames between keyframes, 0: only on request
-	Preset  string
-	Options map[string]string
+	FPS      int
+	Width    int // 0: native
+	Height   int
+	Codec    string // h264, hevc, av1
+	Encoder  string // "" or "auto": best available for Codec
+	HWDevice string // device for hardware encoders that take one (VAAPI render node, CUDA index)
+	Bitrate  int64
+	GOP      int // frames between keyframes, 0: only on request
+	Preset   string
+	Options  map[string]string
 	// Sink gets every encoded packet on the capture thread. Data is only valid
 	// during the call.
 	Sink func(av.Packet) error
@@ -218,6 +222,9 @@ func (s *session) openEncoder(g grabber) (*encoder, error) {
 		cfg.Encoder = name
 		if gg, ok := g.(gpuGrabber); ok {
 			t, device, f := gg.hw()
+			if s.cfg.HWDevice != "" {
+				device = s.cfg.HWDevice
+			}
 			if av.SupportsHW(name, t) {
 				e, err := openHW(gg, cfg, t, device, f)
 				if err == nil {
@@ -227,26 +234,86 @@ func (s *session) openEncoder(g grabber) (*encoder, error) {
 				log.Printf("%s zero copy: %v; trying system memory", name, err)
 			}
 		}
-		var up *av.HWDevice
-		if av.Family(name) == "vaapi" {
-			d, err := av.NewHWDevice(av.VAAPI, "")
+		vaapi := av.Family(name) == "vaapi"
+		devices := []string{""}
+		if vaapi {
+			devices = vaapiDeviceCandidates(s.cfg.HWDevice)
+		}
+		for _, device := range devices {
+			cfg.UploadDev = nil
+			var up *av.HWDevice
+			if vaapi {
+				d, err := av.NewHWDevice(av.VAAPI, device)
+				if err != nil {
+					errs = append(errs, fmt.Errorf("%s device %s: %w", name, deviceLabel(device), err))
+					continue
+				}
+				up, cfg.UploadDev = d, d
+			}
+			cfg.Options = withEncoderDevice(base.Options, name, s.cfg.HWDevice)
+			enc, err := av.Open(cfg)
 			if err != nil {
-				errs = append(errs, fmt.Errorf("%s: %w", name, err))
+				up.Close()
+				if vaapi {
+					errs = append(errs, fmt.Errorf("%s device %s: %w", name, deviceLabel(device), err))
+				} else {
+					errs = append(errs, err)
+				}
 				continue
 			}
-			up, cfg.UploadDev = d, d
+			e := &encoder{Encoder: enc, up: up}
+			s.setInfo(e, w, h)
+			return e, nil
 		}
-		enc, err := av.Open(cfg)
-		if err != nil {
-			up.Close()
-			errs = append(errs, err)
-			continue
-		}
-		e := &encoder{Encoder: enc, up: up}
-		s.setInfo(e, w, h)
-		return e, nil
 	}
 	return nil, errors.Join(errs...)
+}
+
+func vaapiDeviceCandidates(configured string) []string {
+	if configured != "" {
+		return []string{configured}
+	}
+	var devices []string
+	if ents, err := os.ReadDir("/dev/dri"); err == nil {
+		for _, ent := range ents {
+			if strings.HasPrefix(ent.Name(), "renderD") {
+				devices = append(devices, "/dev/dri/"+ent.Name())
+			}
+		}
+	}
+	sort.Strings(devices)
+	return append(devices, "")
+}
+
+func deviceLabel(device string) string {
+	if device == "" {
+		return "default"
+	}
+	return device
+}
+
+// withEncoderDevice maps video.hw_device onto the libav option encoders use
+// when they need a device but take system memory frames.
+func withEncoderDevice(opts map[string]string, encoder, device string) map[string]string {
+	if device == "" {
+		return opts
+	}
+	var key string
+	switch av.Family(encoder) {
+	case "nvenc":
+		key = "gpu"
+	default:
+		return opts
+	}
+	if _, ok := opts[key]; ok {
+		return opts
+	}
+	out := make(map[string]string, len(opts)+1)
+	for k, v := range opts {
+		out[k] = v
+	}
+	out[key] = device
+	return out
 }
 
 func openHW(g gpuGrabber, cfg av.Config, t av.HWType, device string, f av.PixFmt) (*encoder, error) {
