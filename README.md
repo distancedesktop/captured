@@ -12,7 +12,7 @@ Captures a display and encodes it in the same process. The Distance agent spawns
 | `pipewire_mutter` | `pipewire_mutter_linux.go` | GNOME Mutter ScreenCast → PipeWire → `gst-launch-1.0`. Cursor included. Frames only arrive when the screen changes. Run as the desktop user. |
 | `kms_linear` | `kms_linear_linux.go` | Maps a linear scanout buffer and copies it (virtio-gpu, simpledrm, some iGPUs). Refuses tiled buffers. |
 | `screencapturekit` | `screencapturekit_darwin.go` | macOS ScreenCaptureKit via sckit-go. |
-| `dxgi` | `dxgi_windows.go` | Windows DXGI Desktop Duplication, staging texture copy. No cursor. Repeats the last frame when the screen is idle and recreates the duplication on access loss (UAC, mode change, fullscreen). |
+| `dxgi` | `dxgi_windows.go` | Windows DXGI Desktop Duplication. When the encoder takes D3D11 frames at the capture size (nvenc, amf, mf, qsv), the duplication moves onto the encoder's device and frames are copied GPU to GPU straight into it. Scaled or rotated outputs use a staging texture copy instead. No cursor. Repeats the last frame when the screen is idle and recreates the duplication on access loss (UAC, mode change, fullscreen). |
 
 Shared bits: `pipeline.go` (interface and registry), `session.go` (the capture and encode loop, encoder choice, stats), `drm_linux.go`, `egl_linux.go`, `cuda_linux.go`. Capture libraries are loaded at runtime with purego (golang.org/x/sys/windows on Windows). libav is linked with cgo.
 

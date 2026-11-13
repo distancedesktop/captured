@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,14 +16,22 @@ import (
 	"time"
 	"unsafe"
 
+	"distancedesktop/captured/av"
 	"golang.org/x/sys/windows"
 )
 
 // dxgi: DXGI Desktop Duplication. AcquireNextFrame blocks until the compositor
 // presents something, so the source sets the rate (capped at the requested
 // fps). When nothing changes, the last frame is sent again at the requested
-// fps so the stream never goes quiet. Each frame is copied into a staging
-// texture on the GPU, mapped, and packed into BGRA.
+// fps so the stream never goes quiet.
+//
+// Two paths to the encoder:
+// - zero copy: when the encoder takes D3D11 frames at the capture size, frames
+//   are copied GPU to GPU straight into the encoder's texture. The duplication
+//   is re-created on the encoder's device (D3D11 objects can't cross devices).
+// - system memory: each frame is copied into a staging texture, mapped, and
+//   packed into BGRA. Scaled or rotated outputs take this path: there's no
+//   GPU-side scaler/rotator here.
 //
 // Runs in the interactive user's session. The secure desktop (UAC, lock
 // screen) can only be duplicated by SYSTEM; for everyone else the stream keeps
@@ -113,8 +122,10 @@ const (
 	vDuplAcquireNextFrame  = 8
 	vDuplReleaseFrame      = 14
 	vDeviceCreateTexture2D = 5
+	vDeviceImmediateCtx    = 40
 	vContextMap            = 14
 	vContextUnmap          = 15
+	vContextCopySubregion  = 46
 	vContextCopyResource   = 47
 	vTexture2DGetDesc      = 10
 )
@@ -258,6 +269,7 @@ type dxgiOutput struct {
 	rect     dxgiRect
 	rotation uint32
 	hz       float64
+	adapter  int // its adapter's index in DXGI enumeration order
 }
 
 func newFactory() (*com, error) {
@@ -272,10 +284,11 @@ func newFactory() (*com, error) {
 	return f, nil
 }
 
-// eachOutput calls fn for every output of every adapter, in DXGI order. fn
-// owns neither object; returning true stops the walk with both still alive
-// (the caller releases them).
-func eachOutput(f *com, fn func(a, o *com, d *dxgiOutputDesc) bool) (a, o *com, err error) {
+// eachOutput calls fn for every output of every adapter, in DXGI order, with
+// the adapter's index (what ffmpeg's d3d11va device string means). fn owns
+// neither object; returning true stops the walk with both still alive (the
+// caller releases them).
+func eachOutput(f *com, fn func(a, o *com, ai int, d *dxgiOutputDesc) bool) (a, o *com, err error) {
 	for ai := 0; ; ai++ {
 		var ad *com
 		r := f.call(vFactoryEnumAdapters1, uintptr(ai), ptr(&ad))
@@ -301,7 +314,7 @@ func eachOutput(f *com, fn func(a, o *com, d *dxgiOutputDesc) bool) (a, o *com, 
 				ad.release()
 				return nil, nil, fmt.Errorf("IDXGIOutput::GetDesc: %w", err)
 			}
-			if fn(ad, out, &d) {
+			if fn(ad, out, ai, &d) {
 				return ad, out, nil
 			}
 			out.release()
@@ -319,11 +332,11 @@ func dxgiOutputs() ([]dxgiOutput, error) {
 	defer f.release()
 	info := displayConfigInfo()
 	var outs []dxgiOutput
-	_, _, err = eachOutput(f, func(_, _ *com, d *dxgiOutputDesc) bool {
+	_, _, err = eachOutput(f, func(_, _ *com, ai int, d *dxgiOutputDesc) bool {
 		if d.AttachedToDesktop == 0 {
 			return false
 		}
-		o := dxgiOutput{device: windows.UTF16ToString(d.DeviceName[:]), rect: d.DesktopCoordinates, rotation: d.Rotation}
+		o := dxgiOutput{device: windows.UTF16ToString(d.DeviceName[:]), rect: d.DesktopCoordinates, rotation: d.Rotation, adapter: ai}
 		o.name = strings.TrimPrefix(o.device, `\\.\`)
 		if i, ok := info[o.device]; ok {
 			if i.name != "" {
@@ -478,9 +491,12 @@ type d3d11Mapped struct {
 }
 
 const (
-	rot90  = 2
-	rot180 = 3
-	rot270 = 4
+	rotIdentity = 1
+	rot90       = 2
+	rot180      = 3
+	rot270      = 4
+
+	d3d11UsageDefault = 0
 
 	fmtB8G8R8A8       = 87
 	fmtB8G8R8X8       = 88
@@ -493,14 +509,24 @@ const (
 var errInterrupted = errors.New("interrupted")
 
 type dxgiGrabber struct {
-	device string
-	out1   *com // IDXGIOutput1
-	dev    *com // ID3D11Device
-	ctx    *com // ID3D11DeviceContext
-	dup    *com // IDXGIOutputDuplication, nil while the desktop is out of reach
-	stage  *com // staging ID3D11Texture2D
-	desk   uintptr
-	orig   uintptr // the thread's desktop before useInputDesktop; not ours to close
+	device  string
+	adapter int
+	out1    *com // IDXGIOutput1
+	dev     *com // ID3D11Device
+	ctx     *com // ID3D11DeviceContext
+	dup     *com // IDXGIOutputDuplication, nil while the desktop is out of reach
+	stage   *com // staging ID3D11Texture2D (system memory path)
+	desk    uintptr
+	orig    uintptr // the thread's desktop before useInputDesktop; not ours to close
+
+	// zero copy: duplication runs on the encoder's D3D11 device; fdev/fctx are
+	// its device and immediate context (owned by the av.HWDevice, not us).
+	// hwLast is the default-usage texture take() copies into and deliverHW
+	// copies out of.
+	hwMode bool
+	fdev   *com
+	fctx   *com
+	hwLast *com
 
 	w, h   int // as the user sees it
 	tw, th int // as the texture is laid out (unrotated scanout)
@@ -520,7 +546,7 @@ func openDXGI(o dxgiOutput, fps int) (*dxgiGrabber, error) {
 	if err := procD3D11CreateDevice.Find(); err != nil {
 		return nil, fmt.Errorf("d3d11.dll: %w", err)
 	}
-	g := &dxgiGrabber{device: o.device, interval: time.Second / time.Duration(fps)}
+	g := &dxgiGrabber{device: o.device, adapter: o.adapter, interval: time.Second / time.Duration(fps)}
 	// AcquireNextFrame's timeout rounds to the system tick (15.6 ms by
 	// default), which caps an idle 60 fps stream near 40 fps.
 	if procTimeBeginPeriod.Find() == nil {
@@ -535,7 +561,7 @@ func openDXGI(o dxgiOutput, fps int) (*dxgiGrabber, error) {
 	if err != nil {
 		return fail(err)
 	}
-	adapter, out, err := eachOutput(f, func(_, _ *com, d *dxgiOutputDesc) bool {
+	adapter, out, err := eachOutput(f, func(_, _ *com, _ int, d *dxgiOutputDesc) bool {
 		return windows.UTF16ToString(d.DeviceName[:]) == o.device
 	})
 	f.release()
@@ -587,8 +613,12 @@ func (g *dxgiGrabber) useInputDesktop() {
 
 func (g *dxgiGrabber) duplicate() error {
 	g.useInputDesktop()
+	dev := g.dev // the encoder's device in zero copy mode
+	if g.hwMode {
+		dev = g.fdev
+	}
 	var dup *com
-	if err := hrErr(g.out1.call(vOutput1DuplicateOut, uintptr(unsafe.Pointer(g.dev)), ptr(&dup))); err != nil {
+	if err := hrErr(g.out1.call(vOutput1DuplicateOut, uintptr(unsafe.Pointer(dev)), ptr(&dup))); err != nil {
 		return fmt.Errorf("DuplicateOutput: %w", err)
 	}
 	var d dxgiDuplDesc
@@ -613,10 +643,10 @@ func (g *dxgiGrabber) duplicate() error {
 
 func (g *dxgiGrabber) size() (int, int) { return g.w, g.h }
 
-// grab returns once a new frame has arrived and the previous one went out at
-// least an interval ago, or when an interval passes with nothing new (then
-// the last frame goes out again).
-func (g *dxgiGrabber) grab(dst []byte) error {
+// next returns once a frame should go out: a new one arrived and the previous
+// went out at least an interval ago, or an interval passed with nothing new
+// (then the last frame goes out again).
+func (g *dxgiGrabber) next() error {
 	deadline := g.sent.Add(g.interval)
 	for !g.stop.Load() {
 		if g.dup == nil {
@@ -628,7 +658,7 @@ func (g *dxgiGrabber) grab(dst []byte) error {
 				// UAC, lock screen, mode switch: keep the stream alive
 				// with the last frame until the desktop is back.
 				if g.have && !time.Now().Before(deadline) {
-					return g.deliver(dst)
+					return nil
 				}
 				time.Sleep(min(50*time.Millisecond, max(time.Until(deadline), time.Millisecond)))
 				continue
@@ -645,7 +675,7 @@ func (g *dxgiGrabber) grab(dst []byte) error {
 		switch hresult(r) {
 		case hrWaitTimeout:
 			if g.have {
-				return g.deliver(dst)
+				return nil
 			}
 			continue
 		case hrAccessLost:
@@ -663,14 +693,87 @@ func (g *dxgiGrabber) grab(dst []byte) error {
 			return err
 		}
 		if g.have && !time.Now().Before(deadline) {
-			return g.deliver(dst)
+			return nil
 		}
 	}
 	return errInterrupted
 }
 
-// take copies the acquired desktop texture into the staging texture. A frame
-// without a present time is only a cursor update; the image is unchanged.
+func (g *dxgiGrabber) grab(dst []byte) error {
+	if err := g.next(); err != nil {
+		return err
+	}
+	return g.deliver(dst)
+}
+
+// hw: zero copy goes to D3D11 encoders on the output's adapter.
+func (g *dxgiGrabber) hw() (av.HWType, string, av.PixFmt) {
+	return av.D3D11, strconv.Itoa(g.adapter), av.BGRA
+}
+
+// bindHW moves the duplication onto the encoder's device. Only unscaled,
+// unrotated output can go straight into an encoder frame; anything else falls
+// back to the staging path.
+func (g *dxgiGrabber) bindHW(dev *av.HWDevice, w, h int) error {
+	if g.rot != rotIdentity {
+		return fmt.Errorf("rotated output (%d): encoding needs system memory frames", g.rot)
+	}
+	if w != g.tw || h != g.th {
+		return fmt.Errorf("no gpu scaler: %dx%d capture into %dx%d needs system memory frames", g.tw, g.th, w, h)
+	}
+	fdev := dev.D3D11Device()
+	if fdev == nil {
+		return errors.New("d3d11va device context has no device")
+	}
+	var fctx *com
+	(*com)(fdev).call(vDeviceImmediateCtx, ptr(&fctx))
+	if fctx == nil {
+		return errors.New("ID3D11Device::GetImmediateContext failed")
+	}
+	var dup *com
+	if err := hrErr(g.out1.call(vOutput1DuplicateOut, uintptr(fdev), ptr(&dup))); err != nil {
+		fctx.release()
+		return fmt.Errorf("DuplicateOutput on the encoder's device: %w", err)
+	}
+	g.dup.release()
+	g.dup = dup
+	g.fdev = (*com)(fdev) // not ours: the HWDevice owns the device
+	g.fctx = fctx         // ours to release (GetImmediateContext adds a ref)
+	g.hwMode = true
+	g.hwLast.release()
+	g.hwLast = nil
+	g.have, g.fresh = false, true
+	return nil
+}
+
+func (g *dxgiGrabber) unbindHW() {
+	g.hwMode = false
+	g.hwLast.release()
+	g.hwLast = nil
+	g.fctx.release()
+	g.fctx, g.fdev = nil, nil
+	// The dup was created on the encoder's device, which goes away with the
+	// encoder; the next grab re-duplicates on our own device.
+	g.dup.release()
+	g.dup = nil
+	g.have = false
+}
+
+// deliverHW copies the current frame into the encoder's D3D11 frame: a texture
+// pointer in data[0] and a slice index in data[1].
+func (g *dxgiGrabber) grabHW(f av.Frame) error {
+	if err := g.next(); err != nil {
+		return err
+	}
+	g.sent = time.Now()
+	dst := (*com)(f.Data(0))
+	g.fctx.call(vContextCopySubregion, uintptr(unsafe.Pointer(dst)), uintptr(f.Data(1)), 0, 0, 0, uintptr(unsafe.Pointer(g.hwLast)), 0, 0)
+	return nil
+}
+
+// take copies the acquired desktop texture into the hold texture (staging for
+// the cpu path, hwLast for zero copy). A frame without a present time is only
+// a cursor update; the image is unchanged.
 func (g *dxgiGrabber) take(res *com, info *dxgiFrameInfo) error {
 	if info.LastPresentTime == 0 && !g.fresh {
 		return nil
@@ -680,7 +783,11 @@ func (g *dxgiGrabber) take(res *com, info *dxgiFrameInfo) error {
 		return fmt.Errorf("desktop resource isn't a texture: %w", err)
 	}
 	defer tex.release()
-	if g.stage == nil {
+	dst, ctx, dev := &g.stage, g.ctx, g.dev
+	if g.hwMode {
+		dst, ctx, dev = &g.hwLast, g.fctx, g.fdev
+	}
+	if *dst == nil {
 		var d d3d11Texture2DDesc
 		tex.call(vTexture2DGetDesc, ptr(&d))
 		switch d.Format {
@@ -692,12 +799,16 @@ func (g *dxgiGrabber) take(res *com, info *dxgiFrameInfo) error {
 			return fmt.Errorf("desktop texture is %dx%d, duplication says %dx%d", d.Width, d.Height, g.tw, g.th)
 		}
 		d.MipLevels, d.ArraySize, d.SampleCount, d.SampleQuality = 1, 1, 1, 0
-		d.Usage, d.BindFlags, d.CPUAccessFlags, d.MiscFlags = d3d11UsageStaging, 0, d3d11CPURead, 0
-		if err := hrErr(g.dev.call(vDeviceCreateTexture2D, ptr(&d), 0, ptr(&g.stage))); err != nil {
-			return fmt.Errorf("CreateTexture2D (staging): %w", err)
+		if g.hwMode {
+			d.Usage, d.BindFlags, d.CPUAccessFlags, d.MiscFlags = d3d11UsageDefault, 0, 0, 0
+		} else {
+			d.Usage, d.BindFlags, d.CPUAccessFlags, d.MiscFlags = d3d11UsageStaging, 0, d3d11CPURead, 0
+		}
+		if err := hrErr(dev.call(vDeviceCreateTexture2D, ptr(&d), 0, uintptr(unsafe.Pointer(dst)))); err != nil {
+			return fmt.Errorf("CreateTexture2D (hold): %w", err)
 		}
 	}
-	g.ctx.call(vContextCopyResource, uintptr(unsafe.Pointer(g.stage)), uintptr(unsafe.Pointer(tex)))
+	ctx.call(vContextCopyResource, uintptr(unsafe.Pointer(*dst)), uintptr(unsafe.Pointer(tex)))
 	g.have, g.fresh = true, false
 	return nil
 }
@@ -759,6 +870,7 @@ func packBGRA(dst, src []byte, pitch, tw, th int, rot uint32) {
 func (g *dxgiGrabber) interrupt() { g.stop.Store(true) }
 
 func (g *dxgiGrabber) close() error {
+	g.unbindHW()
 	g.stage.release()
 	g.dup.release()
 	g.ctx.release()
