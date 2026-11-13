@@ -9,3 +9,4 @@ build/
 
 # macOS 
 .DS_STORE
+captured.exe

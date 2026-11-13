@@ -32,6 +32,7 @@ type PixFmt int32
 var (
 	RGB0 = PixFmt(C.AV_PIX_FMT_RGB0)
 	BGR0 = PixFmt(C.AV_PIX_FMT_BGR0)
+	BGRA = PixFmt(C.AV_PIX_FMT_BGRA)
 	NV12 = PixFmt(C.AV_PIX_FMT_NV12)
 )
 
