@@ -11,6 +11,7 @@ Captures a display and encodes it in the same process. The Distance agent spawns
 | `kms_nvidia` | `kms_nvidia_linux.go` | Imports the NVIDIA scanout dma-buf into EGL, blits (and scales) it into a texture, copies that into a CUDA frame over CUDA-GL interop and hands it to NVENC. Nothing touches system memory. Falls back to `glReadPixels` for software encoders. Needs `CAP_SYS_ADMIN`. No cursor (it's on its own plane). |
 | `pipewire_mutter` | `pipewire_mutter_linux.go` | GNOME Mutter ScreenCast → PipeWire → `gst-launch-1.0`. Cursor included. Frames only arrive when the screen changes. Run as the desktop user. |
 | `kms_linear` | `kms_linear_linux.go` | Maps a linear scanout buffer and copies it (virtio-gpu, simpledrm, some iGPUs). Refuses tiled buffers. |
+| `x11_xshm` | `x11_xshm_linux.go` | X11 root window (display 0), using MIT-SHM with an XGetImage fallback. Needs `DISPLAY` and X server authorization. Lower priority than KMS. No cursor. |
 | `screencapturekit` | `screencapturekit_darwin.go` | macOS ScreenCaptureKit via sckit-go. |
 | `dxgi` | `dxgi_windows.go` | Windows DXGI Desktop Duplication, staging texture copy. No cursor. Repeats the last frame when the screen is idle and recreates the duplication on access loss (UAC, mode change, fullscreen). |
 
